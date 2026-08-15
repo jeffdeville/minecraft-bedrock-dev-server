@@ -35,6 +35,11 @@ whoever is writing the code. This page is the setup and operations manual.
 there is exactly one code path from source to running world regardless of which
 route a change takes.
 
+Two git remotes, doing different jobs: **`origin`** is GitHub, for history and
+backup; **`prod`** is the bare repo on the server, and pushing to it deploys.
+`mc push` sends to `prod`. Push to `origin` whenever you want the history
+somewhere safe.
+
 ## What "plugin" means here
 
 Bedrock has no Bukkit/Spigot-style plugin API and never has. What it has is
@@ -57,6 +62,19 @@ Beta-track APIs (anything with a `-beta` suffix) additionally require the
 stable APIs so there is nothing extra to toggle.
 
 ## One-time setup
+
+### 0. Get this repo onto the Chromebook
+
+Inside the ChromeOS Linux terminal:
+
+```bash
+sudo apt-get install -y git gh
+gh auth login          # the repo is private, so this is required
+gh repo clone jeffdeville/minecraft-bedrock-dev-server minecraft
+cd minecraft
+```
+
+Everything below runs from that directory.
 
 ### 1. The box
 
