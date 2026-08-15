@@ -1,0 +1,46 @@
+services:
+  bds:
+    image: itzg/minecraft-bedrock-server:${BEDROCK_IMAGE_TAG:-2026.8.1}
+    container_name: mc-bds
+    restart: unless-stopped
+    # tty keeps the log stream unmultiplexed and lets `docker attach` reach the
+    # BDS console for manual commands.
+    stdin_open: true
+    tty: true
+    ports:
+      - "19132:19132/udp"
+    environment:
+      EULA: "TRUE"
+      VERSION: ${VERSION:-LATEST}
+      SERVER_NAME: ${SERVER_NAME:-Dev Server}
+      LEVEL_NAME: ${LEVEL_NAME:-devworld}
+      GAMEMODE: ${GAMEMODE:-creative}
+      DIFFICULTY: ${DIFFICULTY:-easy}
+      ALLOW_CHEATS: ${ALLOW_CHEATS:-true}
+      MAX_PLAYERS: ${MAX_PLAYERS:-10}
+      VIEW_DISTANCE: ${VIEW_DISTANCE:-12}
+      ONLINE_MODE: ${ONLINE_MODE:-true}
+      ALLOW_LIST: ${ALLOW_LIST:-false}
+      # Packs are installed by bin/deploy.sh, which also writes
+      # world_behavior_packs.json. Don't let the image fight it.
+      FORCE_PACK_COPY: "false"
+    volumes:
+      - ./data:/data
+
+  logs:
+    build: ./server/logtail
+    container_name: mc-logs
+    restart: unless-stopped
+    ports:
+      - "${LOG_PORT:-8080}:8080"
+    environment:
+      TARGET_CONTAINER: mc-bds
+      LOG_AUTH: ${LOG_AUTH:-}
+      SERVER_NAME: ${SERVER_NAME:-Dev Server}
+    volumes:
+      # Read-only mount. The service only ever issues GET /containers/*/logs
+      # and GET /containers/*/json against the API.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./state:/state:ro
+    depends_on:
+      - bds

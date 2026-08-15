@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# The only command your son needs. Run from the Chromebook.
+#
+#   mc dev          watch files, deploy on every save   <- the main one
+#   mc sync         deploy once, right now
+#   mc push "msg"   commit + push a checkpoint to git (also deploys)
+#   mc logs         open the web console (or tail it in the terminal)
+#   mc console CMD  run a command on the server, e.g. mc console "time set day"
+#   mc backup       pull a copy of the world down to backups/
+#   mc status       last deploy result
+#   mc ssh          shell on the server
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT"
+
+if [ ! -f .mcrc ]; then
+  echo "No .mcrc found. Run bin/setup-chromebook.sh first." >&2
+  exit 1
+fi
+# shellcheck disable=SC1091
+. ./.mcrc   # provides MC_HOST and MC_LOG_URL
+
+REMOTE_APP=/opt/mc/app
+
+c_dim=$'\033[2m'; c_grn=$'\033[32m'; c_red=$'\033[31m'; c_off=$'\033[0m'
+
+sync_once() {
+  local start; start=$(date +%s%N)
+  rsync -az --delete \
+    --exclude '.git/' --exclude 'data/' --exclude 'state/' \
+    --exclude 'node_modules/' --exclude '.env' --exclude '.mcrc' \
+    ./ "$MC_HOST:$REMOTE_APP/"
+  if ssh "$MC_HOST" "APP=$REMOTE_APP $REMOTE_APP/bin/deploy.sh"; then
+    printf '%s%s deployed in %sms%s\n' "$c_grn" "✓" \
+      "$(( ($(date +%s%N) - start) / 1000000 ))" "$c_off"
+  else
+    printf '%s%s deploy failed -- check %s%s\n' "$c_red" "✗" "$MC_LOG_URL" "$c_off"
+    return 1
+  fi
+}
+
+cmd="${1:-dev}"
+shift || true
+
+case "$cmd" in
+  dev)
+    command -v inotifywait >/dev/null || {
+      echo "inotifywait missing: sudo apt install -y inotify-tools" >&2; exit 1; }
+    echo "${c_dim}watching src/ and packs/ -- save a file to deploy. Ctrl-C to stop.${c_off}"
+    sync_once || true
+    while true; do
+      inotifywait -q -r -e close_write,create,delete,move src packs >/dev/null 2>&1 || true
+      sleep 0.4   # let a burst of saves settle into one deploy
+      printf '%s--- %s ---%s\n' "$c_dim" "$(date +%H:%M:%S)" "$c_off"
+      sync_once || true
+    done
+    ;;
+
+  sync)
+    sync_once
+    ;;
+
+  push)
+    msg="${1:-checkpoint}"
+    git add -A
+    git commit -m "$msg" || echo "${c_dim}nothing to commit${c_off}"
+    git push prod main
+    ;;
+
+  logs)
+    if [ "${1:-}" = "-t" ]; then
+      ssh "$MC_HOST" "docker logs -f --tail 100 mc-bds"
+    else
+      echo "$MC_LOG_URL"
+      command -v xdg-open >/dev/null && xdg-open "$MC_LOG_URL" >/dev/null 2>&1 || true
+    fi
+    ;;
+
+  console)
+    [ $# -gt 0 ] || { echo "usage: mc console \"say hello\"" >&2; exit 1; }
+    ssh "$MC_HOST" "docker exec mc-bds send-command $*"
+    ;;
+
+  backup)
+    mkdir -p backups
+    stamp=$(date +%Y%m%d-%H%M%S)
+    # `save hold` flushes and pauses world writes so the tar is consistent.
+    ssh "$MC_HOST" "
+      docker exec mc-bds send-command save hold >/dev/null 2>&1 || true
+      sleep 2
+      docker exec mc-bds send-command save query >/dev/null 2>&1 || true
+      sleep 1
+      tar czf - -C $REMOTE_APP/data worlds
+      docker exec mc-bds send-command save resume >/dev/null 2>&1 || true
+    " > "backups/world-$stamp.tar.gz"
+    printf '%s✓ backups/world-%s.tar.gz (%s)%s\n' "$c_grn" "$stamp" \
+      "$(du -h "backups/world-$stamp.tar.gz" | cut -f1)" "$c_off"
+    ;;
+
+  status)
+    curl -fsS "$MC_LOG_URL/status" | python3 -m json.tool 2>/dev/null \
+      || echo "could not reach $MC_LOG_URL"
+    ;;
+
+  ssh)
+    exec ssh "$MC_HOST"
+    ;;
+
+  *)
+    sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+    exit 1
+    ;;
+esac

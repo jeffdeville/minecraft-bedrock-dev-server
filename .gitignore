@@ -1,0 +1,19 @@
+# Server runtime state -- never in git
+data/
+state/
+backups/
+.env
+
+# Per-developer server address, written by bin/setup-chromebook.sh
+.mcrc
+
+# Build output. The server builds from src/ on every deploy, so committing
+# compiled scripts would only create diff noise and merge conflicts.
+packs/behavior/*/scripts/
+node_modules/
+
+# Editors / OS
+.DS_Store
+.vscode/
+*.swp
+__pycache__/

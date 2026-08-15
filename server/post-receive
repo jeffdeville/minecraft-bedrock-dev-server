@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Reference copy. bin/bootstrap-server.sh installs this at
+# /opt/mc/repo.git/hooks/post-receive -- edit both if you change it.
+#
+# `git push prod main` from the Chromebook lands here.
+set -euo pipefail
+
+APP=/opt/mc/app
+REPO=/opt/mc/repo.git
+
+while read -r _old new ref; do
+  [ "$ref" = "refs/heads/main" ] || continue
+
+  echo "--> checking out ${new:0:7}"
+  git --work-tree="$APP" --git-dir="$REPO" checkout -f main
+
+  echo "--> deploying"
+  # git sets GIT_DIR/GIT_QUARANTINE_PATH in hook env; clear them so nothing
+  # downstream inherits a repo context it didn't ask for.
+  unset GIT_DIR GIT_WORK_TREE GIT_QUARANTINE_PATH
+  APP="$APP" DEPLOY_REV="${new:0:7}" "$APP/bin/deploy.sh"
+done
