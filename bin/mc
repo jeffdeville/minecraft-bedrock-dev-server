@@ -41,20 +41,28 @@ sync_once() {
   fi
 }
 
+# Content fingerprint of everything worth redeploying for. cksum is POSIX, so
+# this works the same on macOS and on the Chromebook -- no inotify-tools, no
+# fswatch, nothing to install.
+fingerprint() {
+  find src packs -type f 2>/dev/null | sort | xargs cksum 2>/dev/null | cksum
+}
+
 cmd="${1:-dev}"
 shift || true
 
 case "$cmd" in
   dev)
-    command -v inotifywait >/dev/null || {
-      echo "inotifywait missing: sudo apt install -y inotify-tools" >&2; exit 1; }
     echo "${c_dim}watching src/ and packs/ -- save a file to deploy. Ctrl-C to stop.${c_off}"
     sync_once || true
+    last=$(fingerprint)
     while true; do
-      inotifywait -q -r -e close_write,create,delete,move src packs >/dev/null 2>&1 || true
-      sleep 0.4   # let a burst of saves settle into one deploy
+      sleep 1
+      now=$(fingerprint)
+      [ "$now" = "$last" ] && continue
       printf '%s--- %s ---%s\n' "$c_dim" "$(date +%H:%M:%S)" "$c_off"
       sync_once || true
+      last=$(fingerprint)
     done
     ;;
 

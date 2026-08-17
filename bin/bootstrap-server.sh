@@ -82,7 +82,7 @@ ufw allow 8080/tcp  >/dev/null   # log viewer
 ufw --force enable  >/dev/null
 ufw status numbered
 
-IP=$(curl -fsS --max-time 5 https://ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
+IP=$(curl -4 -fsS --max-time 5 https://ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')
 
 cat <<EOF
 

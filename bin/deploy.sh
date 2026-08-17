@@ -102,30 +102,41 @@ fi
 # --- 3. Point the world at the packs ----------------------------------------
 # BDS ignores anything in behavior_packs/ that the world doesn't explicitly
 # list. This is the step everyone forgets and then wonders why nothing ran.
-python3 - "$DATA" "$LEVEL_NAME" <<'PY' || exit 1
-import json, os, sys
+#
+# Only OUR packs get listed. BDS unpacks ~140 stock packs (vanilla, chemistry,
+# editor) into these same directories on first boot, and listing those would
+# tell the world to load vanilla content a second time. The allow-list is
+# simply whatever this repo ships under packs/.
+MANAGED_BP=$(ls packs/behavior 2>/dev/null | tr '\n' ' ')
+MANAGED_RP=$(ls packs/resource 2>/dev/null | tr '\n' ' ')
+
+python3 - "$DATA" "$LEVEL_NAME" "$MANAGED_BP" "$MANAGED_RP" <<'PY' || exit 1
+import json, os, re, sys
 
 data, level = sys.argv[1], sys.argv[2]
+managed = {"behavior_packs": sys.argv[3].split(), "resource_packs": sys.argv[4].split()}
 world = os.path.join(data, "worlds", level)
+
+def load(path):
+    """Mojang's own manifests use // comments (JSONC). Ours don't, but be
+    tolerant so a hand-copied pack can't take the deploy down."""
+    with open(path) as f:
+        return json.loads(re.sub(r"(?m)^\s*//.*$", "", f.read()))
 
 def collect(kind, out_name):
     root = os.path.join(data, kind)
     entries = []
-    if not os.path.isdir(root):
-        return
-    for name in sorted(os.listdir(root)):
+    for name in managed[kind]:
         manifest = os.path.join(root, name, "manifest.json")
         if not os.path.isfile(manifest):
             continue
         try:
-            with open(manifest) as f:
-                m = json.load(f)
-            header = m["header"]
-            entries.append({"pack_id": header["uuid"], "version": header["version"]})
+            header = load(manifest)["header"]
         except (json.JSONDecodeError, KeyError) as e:
-            print(f"  !! {name}/manifest.json is unusable ({e}) -- pack skipped",
+            print(f"  !! {name}/manifest.json is unusable ({e}) -- deploy stopped",
                   file=sys.stderr)
             sys.exit(1)
+        entries.append({"pack_id": header["uuid"], "version": header["version"]})
     path = os.path.join(world, out_name)
     tmp = path + ".tmp"
     with open(tmp, "w") as f:

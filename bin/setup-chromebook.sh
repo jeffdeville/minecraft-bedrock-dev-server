@@ -15,7 +15,7 @@ cd "$ROOT"
 
 echo "==> installing tools"
 sudo apt-get update -qq
-sudo apt-get install -y -qq rsync inotify-tools git curl openssh-client
+sudo apt-get install -y -qq rsync git curl openssh-client
 
 # Node is only needed for editor autocomplete and local typechecking --
 # the actual build happens on the server. Skip it and everything still works.
