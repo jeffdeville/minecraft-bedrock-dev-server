@@ -1,0 +1,22 @@
+{
+  "format_version": 2,
+  "header": {
+    "name": "Hello Pack",
+    "description": "Smoke test for the deploy loop: copy this directory into MC_ADDON_DIR",
+    "uuid": "af406fd4-2b75-42e0-8d2f-489aeceecd06",
+    "version": [1, 0, 0],
+    "min_engine_version": [1, 21, 0]
+  },
+  "modules": [
+    {
+      "type": "script",
+      "language": "javascript",
+      "uuid": "f6aa19cd-6239-47f8-b041-97ceb080ebb4",
+      "version": [1, 0, 0],
+      "entry": "scripts/main.js"
+    }
+  ],
+  "dependencies": [
+    { "module_name": "@minecraft/server", "version": "2.9.0" }
+  ]
+}

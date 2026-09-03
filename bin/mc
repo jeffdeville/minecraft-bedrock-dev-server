@@ -1,101 +1,181 @@
 #!/usr/bin/env bash
-# The only command your son needs. Run from the Chromebook.
+# The dev-machine CLI. Same script on a MacBook and on a Chromebook (Crostini).
 #
-#   mc dev          watch files, deploy on every save   <- the main one
-#   mc sync         deploy once, right now
-#   mc push "msg"   commit + push a checkpoint to git (also deploys)
-#   mc logs         open the web console (or tail it in the terminal)
-#   mc console CMD  run a command on the server, e.g. mc console "time set day"
-#   mc backup       pull a copy of the world down to backups/
-#   mc status       last deploy result
-#   mc ssh          shell on the server
+#   mc dev            watch MC_ADDON_DIR, deploy whenever a pack lands  <- the main one
+#   mc sync           deploy once, right now (this repo's tooling + the add-ons)
+#   mc logs           open the web console (-t tails it in the terminal)
+#   mc console CMD    run a BDS console command, e.g. mc console "time set day"
+#   mc backup         pull a consistent copy of the world into backups/
+#   mc update         upgrade BDS to Mojang's current release (--check to only look)
+#   mc status         last deploy result as JSON
+#   mc ssh            shell on the server
+#   mc bootstrap      one-time server setup, over root ssh (see README)
+#   mc doctor         check this machine can reach 1Password and the server
+#
+# Config comes from .envrc, which `op inject` renders from .envrc.template.
+# direnv normally loads it; if it hasn't, this script sources it itself.
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-if [ ! -f .mcrc ]; then
-  echo "No .mcrc found. Run bin/setup-chromebook.sh first." >&2
-  exit 1
+c_dim=$'\033[2m'; c_grn=$'\033[32m'; c_red=$'\033[31m'; c_off=$'\033[0m'
+die() { printf '%s✗ %s%s\n' "$c_red" "$*" "$c_off" >&2; exit 1; }
+
+# --- config -------------------------------------------------------------------
+if [ -z "${MC_HOST:-}" ]; then
+  [ -f .envrc ] || die "No .envrc. Run bin/setup-client.sh, or: op inject -i .envrc.template -o .envrc"
+  # shellcheck disable=SC1091
+  . ./.envrc
 fi
-# shellcheck disable=SC1091
-. ./.mcrc   # provides MC_HOST and MC_LOG_URL
+[ -n "${MC_HOST:-}" ]      || die "MC_HOST is empty -- check .envrc.template and re-run op inject"
+[ -n "${MC_ADDON_DIR:-}" ] || die "MC_ADDON_DIR is empty -- set it in .envrc.template"
+MC_SSH_USER="${MC_SSH_USER:-mcdev}"
+MC_LOG_URL="${MC_LOG_URL:-http://$MC_HOST:8080}"
+MC_WATCH="${MC_WATCH:-auto}"       # auto | fswatch | inotify | poll
+MC_SETTLE="${MC_SETTLE:-1}"        # seconds of quiet before a burst of saves deploys
 
 REMOTE_APP=/opt/mc/app
+TARGET="$MC_SSH_USER@$MC_HOST"
+SSH_DIR="$HOME/.ssh/mc"
 
-c_dim=$'\033[2m'; c_grn=$'\033[32m'; c_red=$'\033[31m'; c_off=$'\033[0m'
+# --- ssh ----------------------------------------------------------------------
+# The private key comes out of 1Password via .envrc. It is written to a 0600
+# file under ~/.ssh/mc/ only because ssh and rsync need a path; it is rewritten
+# whenever the value in 1Password changes (re-run op inject to rotate).
+mkdir -p "$SSH_DIR" && chmod 700 "$SSH_DIR"
+key_file() {
+  [ -n "${MC_SSH_PRIVATE_KEY:-}" ] || return 0
+  local f="$SSH_DIR/$MC_HOST.key"
+  if [ ! -f "$f" ] || [ "$(cat "$f")" != "$(printf '%s' "$MC_SSH_PRIVATE_KEY")" ]; then
+    (umask 077; printf '%s\n' "$MC_SSH_PRIVATE_KEY" > "$f.tmp" && mv "$f.tmp" "$f")
+  fi
+  echo "$f"
+}
+
+# ControlMaster keeps one connection warm so each deploy's ssh call is ~50ms
+# instead of ~600ms of handshake. Nothing here touches ~/.ssh/config.
+SSH_OPTS=(
+  -o StrictHostKeyChecking=accept-new
+  -o ControlMaster=auto -o "ControlPath=$SSH_DIR/%r@%h:%p" -o ControlPersist=10m
+  -o ServerAliveInterval=30
+)
+KEY_FILE="$(key_file)"
+[ -n "$KEY_FILE" ] && SSH_OPTS+=(-i "$KEY_FILE" -o IdentitiesOnly=yes)
+RSYNC_SSH="ssh ${SSH_OPTS[*]}"
+
+rssh() { ssh "${SSH_OPTS[@]}" "$TARGET" "$@"; }
+
+# --- deploy -------------------------------------------------------------------
+now_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
 
 sync_once() {
-  local start; start=$(date +%s%N)
-  rsync -az --delete \
-    --exclude '.git/' --exclude 'data/' --exclude 'state/' \
-    --exclude 'node_modules/' --exclude '.env' --exclude '.mcrc' \
-    ./ "$MC_HOST:$REMOTE_APP/"
-  if ssh "$MC_HOST" "APP=$REMOTE_APP $REMOTE_APP/bin/deploy.sh"; then
-    printf '%s%s deployed in %sms%s\n' "$c_grn" "✓" \
-      "$(( ($(date +%s%N) - start) / 1000000 ))" "$c_off"
+  local start; start=$(now_ms)
+  [ -d "$MC_ADDON_DIR" ] || die "MC_ADDON_DIR does not exist: $MC_ADDON_DIR"
+
+  # 1. This repo: the deploy script, compose file, log viewer. Excluded paths
+  #    are also protected from --delete, so server-local state survives.
+  rsync -az --delete -e "$RSYNC_SSH" \
+    --exclude '.git/' --exclude '.serena/' --exclude '.envrc' \
+    --exclude 'data/' --exclude 'state/' --exclude 'addons/' \
+    --exclude 'backups/' --exclude '.env' \
+    ./ "$TARGET:$REMOTE_APP/"
+
+  # 2. The add-ons. Dotfiles (editor swap files, .DS_Store) stay home.
+  rsync -az --delete -e "$RSYNC_SSH" --exclude '.*' \
+    "$MC_ADDON_DIR/" "$TARGET:$REMOTE_APP/addons/"
+
+  if rssh "APP=$REMOTE_APP $REMOTE_APP/bin/deploy.sh"; then
+    printf '%s✓ deployed in %sms%s\n' "$c_grn" "$(( $(now_ms) - start ))" "$c_off"
   else
-    printf '%s%s deploy failed -- check %s%s\n' "$c_red" "✗" "$MC_LOG_URL" "$c_off"
+    printf '%s✗ deploy failed -- check %s%s\n' "$c_red" "$MC_LOG_URL" "$c_off"
     return 1
   fi
 }
 
-# Content fingerprint of everything worth redeploying for. cksum is POSIX, so
-# this works the same on macOS and on the Chromebook -- no inotify-tools, no
-# fswatch, nothing to install.
+# Content fingerprint of the add-on directory. cksum is POSIX, so it is the
+# same on macOS and Linux, and it lets every watcher skip events that changed
+# nothing (editor temp files, a tool rewriting identical output).
 fingerprint() {
-  find src packs -type f 2>/dev/null | sort | xargs cksum 2>/dev/null | cksum
+  find "$MC_ADDON_DIR" -type f -not -name '.*' 2>/dev/null | LC_ALL=C sort \
+    | xargs cksum 2>/dev/null | cksum
 }
 
+# Reads one line per filesystem event from stdin, waits for the burst to go
+# quiet, and deploys once if the content actually changed.
+on_events() {
+  local last="$1" now
+  while read -r _; do
+    while read -r -t "$MC_SETTLE" _; do :; done
+    now=$(fingerprint)
+    [ "$now" = "$last" ] && continue
+    last=$now
+    printf '%s--- %s ---%s\n' "$c_dim" "$(date +%H:%M:%S)" "$c_off"
+    sync_once || true
+    last=$(fingerprint)
+  done
+}
+
+pick_watcher() {
+  case "$MC_WATCH" in
+    auto)
+      if command -v fswatch >/dev/null; then echo fswatch
+      elif command -v inotifywait >/dev/null; then echo inotify
+      else echo poll; fi ;;
+    fswatch|inotify|poll) echo "$MC_WATCH" ;;
+    *) die "MC_WATCH must be auto, fswatch, inotify or poll" ;;
+  esac
+}
+
+watch_loop() {
+  local watcher; watcher=$(pick_watcher)
+  echo "${c_dim}watching $MC_ADDON_DIR via $watcher -- drop a pack there to deploy. Ctrl-C to stop.${c_off}"
+  sync_once || true
+  local last; last=$(fingerprint)
+  case "$watcher" in
+    fswatch)
+      fswatch -o -r --latency 0.3 "$MC_ADDON_DIR" | on_events "$last" ;;
+    inotify)
+      inotifywait -m -r -q -e close_write,moved_to,create,delete,moved_from \
+        "$MC_ADDON_DIR" | on_events "$last" ;;
+    poll)
+      # Fallback for filesystems without events (e.g. a ChromeOS shared folder
+      # mounted into Crostini): emit a tick per second and let on_events
+      # compare fingerprints.
+      while sleep 1; do echo tick; done | on_events "$last" ;;
+  esac
+}
+
+# --- commands -----------------------------------------------------------------
 cmd="${1:-dev}"
 shift || true
 
 case "$cmd" in
-  dev)
-    echo "${c_dim}watching src/ and packs/ -- save a file to deploy. Ctrl-C to stop.${c_off}"
-    sync_once || true
-    last=$(fingerprint)
-    while true; do
-      sleep 1
-      now=$(fingerprint)
-      [ "$now" = "$last" ] && continue
-      printf '%s--- %s ---%s\n' "$c_dim" "$(date +%H:%M:%S)" "$c_off"
-      sync_once || true
-      last=$(fingerprint)
-    done
-    ;;
-
-  sync)
-    sync_once
-    ;;
-
-  push)
-    msg="${1:-checkpoint}"
-    git add -A
-    git commit -m "$msg" || echo "${c_dim}nothing to commit${c_off}"
-    git push prod main
-    ;;
+  dev)   watch_loop ;;
+  sync)  sync_once ;;
 
   logs)
     if [ "${1:-}" = "-t" ]; then
-      ssh "$MC_HOST" "docker logs -f --tail 100 mc-bds"
+      rssh "docker logs -f --tail 100 mc-bds"
     else
       echo "$MC_LOG_URL"
-      command -v xdg-open >/dev/null && xdg-open "$MC_LOG_URL" >/dev/null 2>&1 || true
+      if command -v open >/dev/null; then open "$MC_LOG_URL"
+      elif command -v xdg-open >/dev/null; then xdg-open "$MC_LOG_URL" >/dev/null 2>&1 || true
+      fi
     fi
     ;;
 
   console)
-    [ $# -gt 0 ] || { echo "usage: mc console \"say hello\"" >&2; exit 1; }
-    ssh "$MC_HOST" "docker exec mc-bds send-command $*"
+    [ $# -gt 0 ] || die 'usage: mc console "say hello"'
+    rssh "docker exec mc-bds send-command $*"
     ;;
 
   backup)
     mkdir -p backups
     stamp=$(date +%Y%m%d-%H%M%S)
     # `save hold` flushes and pauses world writes so the tar is consistent.
-    ssh "$MC_HOST" "
+    rssh "
       docker exec mc-bds send-command save hold >/dev/null 2>&1 || true
       sleep 2
       docker exec mc-bds send-command save query >/dev/null 2>&1 || true
@@ -107,17 +187,52 @@ case "$cmd" in
       "$(du -h "backups/world-$stamp.tar.gz" | cut -f1)" "$c_off"
     ;;
 
+  update)
+    rssh "APP=$REMOTE_APP $REMOTE_APP/bin/update-bds.sh $*"
+    ;;
+
   status)
-    curl -fsS "$MC_LOG_URL/status" | python3 -m json.tool 2>/dev/null \
+    auth=(); [ -n "${MC_LOG_AUTH:-}" ] && auth=(-u "$MC_LOG_AUTH")
+    curl -fsS "${auth[@]}" "$MC_LOG_URL/status" | python3 -m json.tool 2>/dev/null \
       || echo "could not reach $MC_LOG_URL"
     ;;
 
   ssh)
-    exec ssh "$MC_HOST"
+    exec ssh "${SSH_OPTS[@]}" "$TARGET" "$@"
+    ;;
+
+  bootstrap)
+    # Provision-time: the same 1Password key was handed to the cloud provider
+    # for root, so root ssh works with it. The public half is derived from the
+    # private key and installed for the deploy user; no key ever leaves 1Password
+    # except through this machine.
+    [ -n "$KEY_FILE" ] || die "MC_SSH_PRIVATE_KEY is empty; bootstrap needs the key from 1Password"
+    pub=$(ssh-keygen -y -f "$KEY_FILE")
+    echo "==> bootstrapping root@$MC_HOST as $MC_SSH_USER"
+    ssh "${SSH_OPTS[@]}" "root@$MC_HOST" \
+      "MC_USER='$MC_SSH_USER' MC_PUBKEY='$pub' bash -s" < bin/bootstrap-server.sh
+    ;;
+
+  doctor)
+    ok()   { printf '%s✓%s %s\n' "$c_grn" "$c_off" "$*"; }
+    bad()  { printf '%s✗%s %s\n' "$c_red" "$c_off" "$*"; }
+    command -v op >/dev/null     && ok "op $(op --version)"        || bad "1Password CLI (op) missing"
+    command -v direnv >/dev/null && ok "direnv"                     || bad "direnv missing (optional; mc sources .envrc itself)"
+    [ -f .envrc ]                && ok ".envrc rendered"            || bad ".envrc missing -- op inject -i .envrc.template -o .envrc"
+    ok "watcher: $(pick_watcher)"
+    [ -d "$MC_ADDON_DIR" ]       && ok "MC_ADDON_DIR $MC_ADDON_DIR" || bad "MC_ADDON_DIR missing: $MC_ADDON_DIR"
+    if [ -n "$KEY_FILE" ]; then
+      ssh-keygen -y -f "$KEY_FILE" >/dev/null 2>&1 && ok "ssh key parses ($(ssh-keygen -lf "$KEY_FILE" | cut -d' ' -f1,2))" \
+        || bad "MC_SSH_PRIVATE_KEY is not a valid private key"
+    else
+      ok "no MC_SSH_PRIVATE_KEY; using your ssh agent / default keys"
+    fi
+    rssh -o ConnectTimeout=5 -o BatchMode=yes true 2>/dev/null && ok "ssh $TARGET" || bad "cannot ssh to $TARGET"
+    rssh -o BatchMode=yes "test -x $REMOTE_APP/bin/deploy.sh" 2>/dev/null && ok "server has deploy.sh" || bad "server not bootstrapped or never synced (mc bootstrap / mc sync)"
     ;;
 
   *)
-    sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
     ;;
 esac

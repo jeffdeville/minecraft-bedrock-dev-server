@@ -2,18 +2,16 @@
 data/
 state/
 backups/
+addons/
 .env
 
-# Per-developer server address, written by bin/setup-chromebook.sh
-.mcrc
+# Secrets -- resolved values, rendered by op inject. The template is committed.
+.envrc
+!.envrc.template
 
-# Build output. The server builds from src/ on every deploy, so committing
-# compiled scripts would only create diff noise and merge conflicts.
-packs/behavior/*/scripts/
-node_modules/
-
-# Editors / OS
+# Editors / OS / tools
 .DS_Store
 .vscode/
 *.swp
 __pycache__/
+.serena/

@@ -1,27 +1,28 @@
 #!/usr/bin/env bash
-# Runs ON THE SERVER. The single deploy path -- both `mc dev` (rsync) and
-# `git push prod` end up here, so there is exactly one way a change reaches
-# the running world.
+# Runs ON THE SERVER, at /opt/mc/app/bin/deploy.sh, invoked over ssh by
+# `mc sync` / `mc dev` after they rsync this tree and the add-ons up. It is
+# the only way a change reaches the running world:
 #
-#   build -> install packs -> point the world at them -> restart -> record state
+#   install add-ons -> point the world at them -> restart/reload BDS -> record state
 
 set -euo pipefail
 
 APP="${APP:-/opt/mc/app}"
 DATA="$APP/data"
 STATE="$APP/state"
+ADDONS="$APP/addons"
 LOCK=/tmp/mc-deploy.lock
 
 cd "$APP"
 
-# Serialize. A fast typist can trigger two deploys inside one build.
+# Serialize. A build tool can emit several files inside one deploy.
 exec 9>"$LOCK"
 if ! flock -n 9; then
   echo "deploy already running, skipping" >&2
   exit 0
 fi
 
-# First deploy on a fresh box: .env is gitignored and not rsynced, so seed it.
+# First deploy on a fresh box: .env is server-local and never rsynced, so seed it.
 if [ ! -f .env ] && [ -f .env.example ]; then
   cp .env.example .env
   echo "seeded .env from .env.example -- edit it on the server to change settings"
@@ -34,30 +35,45 @@ if [ -f .env ]; then
 fi
 LEVEL_NAME="${LEVEL_NAME:-devworld}"
 RELOAD_MODE="${RELOAD_MODE:-restart}"
+AUTO_UPDATE="${AUTO_UPDATE:-true}"
+UPDATE_CRON="${UPDATE_CRON:-0 8 * * *}"
 
 started=$(date +%s)
-mkdir -p "$STATE"
+mkdir -p "$STATE" "$ADDONS"
 
-fail() {
-  echo "DEPLOY FAILED: $*" >&2
-  write_state "failed" "$*"
-  exit 1
-}
+# Pin the game version. With VERSION=LATEST the image would upgrade BDS on any
+# restart -- i.e. on every deploy -- with no backup. update-bds.sh --pin writes
+# the running version (or today's release on a fresh box) into .env once, and
+# from then on only `mc update` changes it.
+VERSION=$("$APP/bin/update-bds.sh" --pin | tail -1)
+export VERSION
+
+# Nightly update check, installed in the deploy user's crontab so any box this
+# script deploys to gets it. AUTO_UPDATE=false in .env removes it.
+cron_line="$UPDATE_CRON APP=$APP $APP/bin/update-bds.sh >> $STATE/update.log 2>&1 # mc-update"
+{ crontab -l 2>/dev/null || true; } | grep -v '# mc-update$' > /tmp/mc-crontab.$$ || true
+if [ "$AUTO_UPDATE" = "true" ]; then
+  echo "$cron_line" >> /tmp/mc-crontab.$$
+fi
+crontab /tmp/mc-crontab.$$ && rm -f /tmp/mc-crontab.$$
+
+# A short content hash of the add-ons tree stands in for a git revision on the
+# log page, so you can tell whether the deploy you're looking at is the one you
+# just saved.
+revision=$(find "$ADDONS" -type f -print0 | sort -z | xargs -0 -r sha256sum \
+  | sha256sum | cut -c1-7)
 
 write_state() {
   local status="$1" detail="${2:-}"
-  # post-receive exports DEPLOY_REV. The rsync path has no commit behind it --
-  # the working tree is whatever was on the Chromebook a second ago.
-  local sha="${DEPLOY_REV:-rsync}"
-  python3 - "$STATE/deploy.json" "$status" "$detail" "$sha" "$(( $(date +%s) - started ))" <<'PY'
+  python3 - "$STATE/deploy.json" "$status" "$detail" "$revision" "$(( $(date +%s) - started ))" <<'PY'
 import json, sys, time, os
-path, status, detail, sha, secs = sys.argv[1:6]
+path, status, detail, rev, secs = sys.argv[1:6]
 tmp = path + ".tmp"
 with open(tmp, "w") as f:
     json.dump({
         "status": status,
         "detail": detail,
-        "revision": sha,
+        "revision": rev,
         "duration_seconds": int(secs),
         "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "at_epoch": int(time.time()),
@@ -66,89 +82,18 @@ os.replace(tmp, path)
 PY
 }
 
-# --- 1. Build ---------------------------------------------------------------
-# Runs in a container so the host needs no Node toolchain at all. node_modules
-# persists in the working tree between deploys, so the warm path is ~1s.
-echo "==> build"
-# package-lock.json may not exist yet; `cat` failing under pipefail would
-# otherwise abort the whole deploy.
-deps_hash=$( { cat package.json; cat package-lock.json 2>/dev/null || true; } \
-  | sha256sum | cut -d' ' -f1)
-install_cmd="true"
-if [ ! -f node_modules/.deps-hash ] || [ "$(cat node_modules/.deps-hash)" != "$deps_hash" ]; then
-  echo "    dependencies changed, installing"
-  install_cmd="if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi"
-fi
+fail() {
+  echo "DEPLOY FAILED: $*" >&2
+  write_state "failed" "$*"
+  exit 1
+}
 
-docker run --rm \
-  -v "$APP:/app" -w /app \
-  -u "$(id -u):$(id -g)" \
-  -e HOME=/tmp \
-  node:22-slim \
-  sh -ec "$install_cmd; node build.mjs" || fail "build failed -- see the log page"
+# --- 1. Install add-ons and activate them on the world ----------------------
+echo "==> install add-ons ($revision) on BDS $VERSION"
+python3 "$APP/bin/install-packs.py" "$ADDONS" "$DATA" "$STATE" "$LEVEL_NAME" \
+  || fail "add-on install failed -- see the log page"
 
-echo "$deps_hash" > node_modules/.deps-hash
-
-# --- 2. Install packs into the BDS data volume ------------------------------
-echo "==> install packs"
-mkdir -p "$DATA/behavior_packs" "$DATA/resource_packs" "$DATA/worlds/$LEVEL_NAME"
-
-# --delete so that deleting a pack locally actually removes it from the server.
-rsync -a --delete packs/behavior/ "$DATA/behavior_packs/"
-if [ -d packs/resource ] && [ -n "$(ls -A packs/resource 2>/dev/null)" ]; then
-  rsync -a --delete packs/resource/ "$DATA/resource_packs/"
-fi
-
-# --- 3. Point the world at the packs ----------------------------------------
-# BDS ignores anything in behavior_packs/ that the world doesn't explicitly
-# list. This is the step everyone forgets and then wonders why nothing ran.
-#
-# Only OUR packs get listed. BDS unpacks ~140 stock packs (vanilla, chemistry,
-# editor) into these same directories on first boot, and listing those would
-# tell the world to load vanilla content a second time. The allow-list is
-# simply whatever this repo ships under packs/.
-MANAGED_BP=$(ls packs/behavior 2>/dev/null | tr '\n' ' ')
-MANAGED_RP=$(ls packs/resource 2>/dev/null | tr '\n' ' ')
-
-python3 - "$DATA" "$LEVEL_NAME" "$MANAGED_BP" "$MANAGED_RP" <<'PY' || exit 1
-import json, os, re, sys
-
-data, level = sys.argv[1], sys.argv[2]
-managed = {"behavior_packs": sys.argv[3].split(), "resource_packs": sys.argv[4].split()}
-world = os.path.join(data, "worlds", level)
-
-def load(path):
-    """Mojang's own manifests use // comments (JSONC). Ours don't, but be
-    tolerant so a hand-copied pack can't take the deploy down."""
-    with open(path) as f:
-        return json.loads(re.sub(r"(?m)^\s*//.*$", "", f.read()))
-
-def collect(kind, out_name):
-    root = os.path.join(data, kind)
-    entries = []
-    for name in managed[kind]:
-        manifest = os.path.join(root, name, "manifest.json")
-        if not os.path.isfile(manifest):
-            continue
-        try:
-            header = load(manifest)["header"]
-        except (json.JSONDecodeError, KeyError) as e:
-            print(f"  !! {name}/manifest.json is unusable ({e}) -- deploy stopped",
-                  file=sys.stderr)
-            sys.exit(1)
-        entries.append({"pack_id": header["uuid"], "version": header["version"]})
-    path = os.path.join(world, out_name)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(entries, f, indent=2)
-    os.replace(tmp, path)
-    print(f"  {out_name}: {len(entries)} pack(s)")
-
-collect("behavior_packs", "world_behavior_packs.json")
-collect("resource_packs", "world_resource_packs.json")
-PY
-
-# --- 4. Apply -----------------------------------------------------------------
+# --- 2. Apply -----------------------------------------------------------------
 was_running=no
 if docker ps --format '{{.Names}}' | grep -qx mc-bds; then
   was_running=yes

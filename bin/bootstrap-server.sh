@@ -1,22 +1,24 @@
 #!/usr/bin/env bash
-# Run ONCE on a fresh Ubuntu 24.04 x86-64 box, as root.
-#
-# From your Chromebook:
-#   ssh root@<server-ip> 'bash -s' < bin/bootstrap-server.sh
+# Run ONCE on a fresh Ubuntu x86-64 box (Vultr or anywhere), as root.
+# Normally invoked from the dev machine as `mc bootstrap`, which streams this
+# script over root ssh and passes the deploy user's public key in MC_PUBKEY.
+# By hand:
+#   ssh root@<server-ip> "MC_PUBKEY='ssh-ed25519 AAAA...' bash -s" < bin/bootstrap-server.sh
 #
 # Idempotent -- safe to re-run.
 
 set -euo pipefail
 
-MC_USER=mcdev
+MC_USER="${MC_USER:-mcdev}"
 MC_ROOT=/opt/mc
+MC_PUBKEY="${MC_PUBKEY:-}"
 
 [ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
 
 echo "==> packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq ca-certificates curl git rsync python3 ufw
+apt-get install -y -qq ca-certificates curl rsync python3 ufw cron
 
 if ! command -v docker >/dev/null; then
   echo "==> docker"
@@ -35,45 +37,24 @@ fi
 echo "==> user $MC_USER"
 id -u "$MC_USER" >/dev/null 2>&1 || useradd -m -s /bin/bash "$MC_USER"
 usermod -aG docker "$MC_USER"
+AUTH="/home/$MC_USER/.ssh/authorized_keys"
 install -d -m 0700 -o "$MC_USER" -g "$MC_USER" "/home/$MC_USER/.ssh"
-touch "/home/$MC_USER/.ssh/authorized_keys"
-chown "$MC_USER:$MC_USER" "/home/$MC_USER/.ssh/authorized_keys"
-chmod 600 "/home/$MC_USER/.ssh/authorized_keys"
+touch "$AUTH"
 
-# Convenience: if root already has keys, let the same key reach mcdev.
-if [ -s /root/.ssh/authorized_keys ]; then
-  sort -u /root/.ssh/authorized_keys "/home/$MC_USER/.ssh/authorized_keys" \
-    > "/home/$MC_USER/.ssh/authorized_keys.new"
-  mv "/home/$MC_USER/.ssh/authorized_keys.new" "/home/$MC_USER/.ssh/authorized_keys"
-  chown "$MC_USER:$MC_USER" "/home/$MC_USER/.ssh/authorized_keys"
-  chmod 600 "/home/$MC_USER/.ssh/authorized_keys"
+if [ -n "$MC_PUBKEY" ]; then
+  grep -qxF "$MC_PUBKEY" "$AUTH" || echo "$MC_PUBKEY" >> "$AUTH"
+  echo "    installed the deploy key for $MC_USER"
+elif [ -s /root/.ssh/authorized_keys ]; then
+  # No key given: let whatever reaches root also reach the deploy user.
+  sort -u /root/.ssh/authorized_keys "$AUTH" > "$AUTH.new" && mv "$AUTH.new" "$AUTH"
   echo "    copied root's authorized_keys to $MC_USER"
 fi
+chown "$MC_USER:$MC_USER" "$AUTH"
+chmod 600 "$AUTH"
 
 echo "==> directories"
 install -d -o "$MC_USER" -g "$MC_USER" "$MC_ROOT" "$MC_ROOT/app" \
-  "$MC_ROOT/app/data" "$MC_ROOT/app/state"
-
-echo "==> bare git repo (push target)"
-if [ ! -d "$MC_ROOT/repo.git" ]; then
-  sudo -u "$MC_USER" git init -q --bare --initial-branch=main "$MC_ROOT/repo.git"
-fi
-cat > "$MC_ROOT/repo.git/hooks/post-receive" <<'HOOK'
-#!/usr/bin/env bash
-set -euo pipefail
-APP=/opt/mc/app
-REPO=/opt/mc/repo.git
-while read -r _old new ref; do
-  [ "$ref" = "refs/heads/main" ] || continue
-  echo "--> checking out ${new:0:7}"
-  git --work-tree="$APP" --git-dir="$REPO" checkout -f main
-  echo "--> deploying"
-  unset GIT_DIR GIT_WORK_TREE GIT_QUARANTINE_PATH
-  APP="$APP" DEPLOY_REV="${new:0:7}" "$APP/bin/deploy.sh"
-done
-HOOK
-chmod +x "$MC_ROOT/repo.git/hooks/post-receive"
-chown -R "$MC_USER:$MC_USER" "$MC_ROOT"
+  "$MC_ROOT/app/data" "$MC_ROOT/app/state" "$MC_ROOT/app/addons"
 
 echo "==> firewall"
 ufw allow 22/tcp    >/dev/null
@@ -90,14 +71,9 @@ cat <<EOF
 
   Minecraft address : $IP  port 19132
   Log viewer        : http://$IP:8080
-  Deploy user       : $MC_USER
+  Deploy user       : $MC_USER  (ssh $MC_USER@$IP)
 
-Next, on the Chromebook:
-
-  1. bin/setup-chromebook.sh $IP
-  2. paste the printed public key into
-     /home/$MC_USER/.ssh/authorized_keys on this box
-  3. bin/mc sync
+Next, on the dev machine:  mc sync    (first deploy pulls the BDS image; give it a couple of minutes)
 
 Note: docker publishes ports past ufw's INPUT rules, so 19132/udp and 8080/tcp
 are reachable regardless -- the ufw rules above document intent and cover the

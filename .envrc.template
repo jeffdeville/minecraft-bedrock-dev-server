@@ -1,0 +1,38 @@
+# Dev-machine config. Secret references only -- rendered by 1Password into the
+# gitignored .envrc:
+#
+#     op inject -i .envrc.template -o .envrc && direnv allow .
+#
+# (bin/setup-client.sh does this for you.) Everything needed to reach the
+# server lives on ONE 1Password item: an "SSH Key" item called minecraft-vps in
+# the ArdenShared vault, with two extra text fields, host and username. See the
+# README, "Put the server in 1Password". Change the vault/item names below to
+# match yours.
+#
+# Reference format: https://developer.1password.com/docs/cli/secret-references/
+
+# --- Server access ------------------------------------------------------------
+export MC_HOST="op://ArdenShared/minecraft-vps/host"
+export MC_SSH_USER="op://ArdenShared/minecraft-vps/username"
+# 1Password hands out SSH-Key items as PKCS#8 unless asked for OpenSSH format,
+# and OpenSSH will not load an ed25519 key in PKCS#8. Keep the ssh-format part.
+export MC_SSH_PRIVATE_KEY="op://ArdenShared/minecraft-vps/private key?ssh-format=openssh"
+
+# Optional: if the server's .env sets LOG_AUTH (user:password on the log page),
+# add a log-auth field to the item and export MC_LOG_AUTH from it here so
+# `mc status` can read the page. (Not written out: op inject resolves secret
+# references even inside comments, and an unfilled one fails the render.)
+
+# --- This machine (not secret, but per-machine, so it lives here too) ---------
+# The directory your add-on project writes finished packs into. `mc dev`
+# watches it; anything that lands here is deployed. Pack directories, .mcpack
+# and .mcaddon files are all fine, nested however your build tool likes.
+export MC_ADDON_DIR="$HOME/minecraft-addons"
+
+# Web console. Defaults to http://$MC_HOST:8080; set this if you use a DNS name.
+# export MC_LOG_URL="http://mc.example.com:8080"
+
+# Watcher: auto picks fswatch (macOS) or inotifywait (Linux) and falls back to
+# polling. Force poll if MC_ADDON_DIR is on a ChromeOS shared folder, which
+# does not deliver inotify events into Crostini.
+# export MC_WATCH=poll
