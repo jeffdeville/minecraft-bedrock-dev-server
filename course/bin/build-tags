@@ -8,64 +8,28 @@ Replay the course solutions into git tags and fetch them into WORKSPACE:
 
 Solutions are overlays in course/solutions/<id>/step-N/ (see FORMAT.md). A
 step without an overlay changes nothing. After every step the lesson's own
-checks are run against the result (`lesson check ID --upto N`); a solution
-that fails its own checks stops the build, so this is also the content test.
+checks are run against the result, so a solution that fails its own checks
+stops the build: this is also the content test. Tags for steps that no longer
+exist are removed from WORKSPACE and its lessons/ copy is refreshed, so
+running this again after editing a lesson brings an existing workspace up to
+date.
 """
 
-import os
-import re
-import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
-from courselib import COURSE, copy_tree, die, git, lesson_ids, stage_workspace
-
-STEP_RE = re.compile(r"^## Step (\d+):", re.M)
-
-
-def step_count(lesson_id):
-    text = (COURSE / "lessons" / f"{lesson_id}.md").read_text(encoding="utf-8")
-    return len(STEP_RE.findall(text))
-
-
-def verify(tmp, lesson_id, upto):
-    env = dict(os.environ, COURSE_WORKSPACE=str(tmp))
-    r = subprocess.run([sys.executable, str(COURSE / "bin" / "lesson"), "check", lesson_id, "--upto", str(upto)],
-                       cwd=tmp, env=env, capture_output=True, text=True)
-    if r.returncode != 0:
-        print(r.stdout)
-        die(f"solution for {lesson_id} step {upto} fails its own checks (above)")
+from courselib import build_tags, die
 
 
 def main(argv):
-    if not argv or argv[0].startswith("-"):
+    flags = [a for a in argv if a.startswith("-")]
+    positional = [a for a in argv if not a.startswith("-")]
+    if len(positional) != 1 or set(flags) - {"--no-verify"}:
         die(__doc__.strip())
-    ws = Path(argv[0]).resolve()
-    do_verify = "--no-verify" not in argv
+    ws = Path(positional[0]).resolve()
     if not (ws / ".git").is_dir():
         die(f"{ws} is not a git repository")
-    with tempfile.TemporaryDirectory() as tmpdir:
-        tmp = Path(tmpdir)
-        stage_workspace(tmp)
-        git(tmp, "init", "-q", "-b", "main")
-        git(tmp, "add", "-A")
-        git(tmp, "commit", "-q", "-m", "template")
-        built = 0
-        for lid in lesson_ids():
-            for n in range(1, step_count(lid) + 1):
-                git(tmp, "tag", "-f", f"lesson/{lid}/step-{n}")
-                overlay = COURSE / "solutions" / lid / f"step-{n}"
-                if overlay.is_dir():
-                    copy_tree(overlay, tmp)
-                    git(tmp, "add", "-A")
-                    if git(tmp, "status", "--porcelain").stdout.strip():
-                        git(tmp, "commit", "-q", "-m", f"{lid} step {n}")
-                if do_verify:
-                    verify(tmp, lid, n)
-                git(tmp, "tag", "-f", f"lesson/{lid}/step-{n}-solution")
-                built += 1
-        git(ws, "fetch", "-q", "--no-tags", "--force", str(tmp), "refs/tags/*:refs/tags/*")
+    built = build_tags(ws, verify="--no-verify" not in flags)
     print(f"built {built} step tag pairs into {ws}")
     return 0
 

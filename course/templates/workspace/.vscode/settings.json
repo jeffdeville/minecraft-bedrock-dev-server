@@ -1,0 +1,15 @@
+{
+  "workbench.editorAssociations": {
+    "lessons/**/*.md": "vscode.markdown.preview.editor"
+  },
+  "files.autoSave": "afterDelay",
+  "files.autoSaveDelay": 1000,
+  "files.exclude": {
+    ".course": true,
+    ".git": true
+  },
+  "editor.quickSuggestions": { "other": "off", "comments": "off", "strings": "off" },
+  "editor.minimap.enabled": false,
+  "git.enabled": false,
+  "workbench.startupEditor": "none"
+}

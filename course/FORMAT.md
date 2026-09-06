@@ -24,7 +24,9 @@ README.md                  one paragraph: run `lesson` in the terminal
 
 The platform deploys `packs/` plus `course/grader_bp/` into the learner's
 Bedrock server. The grader pack is never in the workspace; the learner cannot
-edit it and does not see it.
+edit it and does not see it. The platform also puts `course/bin` on `PATH` in
+the learner's terminal, so `lesson` is a command there (`new-workspace` prints
+the same `PATH=` line for a laptop).
 
 Solutions live in git tags in the workspace, built by `course/bin/build-tags`:
 
@@ -32,10 +34,12 @@ Solutions live in git tags in the workspace, built by `course/bin/build-tags`:
 - `lesson/<id>/step-N-solution` is the state after step N.
 
 `lesson answer` diffs the working tree against the solution tag for the step
-the learner is on, limited to the lesson's `files`. `lesson answer --apply`
-writes those files. Solutions carry fixed UUIDs, so two learners who both
-apply the answer end up with the same UUIDs, which is fine because each has
-their own server.
+the learner is on, limited to the lesson's `files`; a file the solution has not
+created by that step is left alone. When a file stops parsing every step fails,
+so the step shown is the furthest one the learner had reached (`high` in
+progress.json), never earlier. `lesson answer --apply` writes those files.
+Solutions carry fixed UUIDs, so two learners who both apply the answer end up
+with the same UUIDs, which is fine because each has their own server.
 
 ## A lesson file
 
@@ -78,14 +82,17 @@ Rules:
 - Frontmatter keys: `id` (must equal the filename without `.md`), `title`,
   `concept` (one sentence), `files` (paths relative to the workspace that the
   lesson touches; `lesson answer` is limited to these), `game` (`true` when
-  a step uses a `game` check).
+  a step uses a `game` check; the checker refuses a mismatch).
 - Steps are `## Step N: <imperative title>`, N contiguous from 1. The checker
   refuses a lesson with a gap.
 - The check block is an HTML comment starting with `<!-- check`, immediately
   after the step heading, one JSON object per line. The preview hides it.
+  Exactly one block per step; the checker refuses a step without one.
 - Every check has a `msg` written for the learner: what is wrong and what to
   do, not what the check is called. Optional `name` is the short TAP label;
-  the default is the file and path.
+  the default is the file and path. The checker refuses a check without a
+  `msg`, with a key it does not know, or with a file outside the workspace,
+  so `build-tags` catches these before a learner does.
 - One `<details><summary>Hint</summary>…</details>` per step.
 - Nothing in a step may use a word or a file the learner has not met in an
   earlier step or lesson.
@@ -108,10 +115,10 @@ with a message that says so.
 | `exists` | `"exists": FILE`, optional `"png": true` | the file exists (and starts with the PNG signature) |
 | `json` | `"json": FILE, "path": PATH` plus one or more of `"exists": true`, `"equals": V`, `"not": V`, `"matches": REGEX`, `"oneOf": [..]`, `"uuid": true`, `"differsFrom": PATH` | the file parses and the value at `PATH` satisfies every condition given |
 | `regex` | `"regex": FILE, "pattern": P`, optional `"count": N` | the pattern matches (exactly N times if given) |
-| `same` | `"same": [SPEC, SPEC]` | both specs extract a value and the values are equal, exact |
-| `js` | `"js": FILE` | `node --check` passes (skipped without node), no `console.log`, no `beforeEvents`, no `worldInitialize`, no `world.` call at the top level other than `.subscribe(` |
-| `deploy` | `"deploy": "ok"`, optional `"behavior_packs": [..]`, `"resource_packs": [..]` | `.course/deploy.json` says `ok` and lists those pack directories; SKIP if the file is absent |
-| `game` | `"game": ID` | `.course/game-check ID` exits 0; SKIP if the hook is absent |
+| `same` | `"same": [SPEC, SPEC]` | both specs extract a value and the values are equal: text trimmed, lists and objects compared as JSON |
+| `js` | `"js": FILE` | `node --check` passes (skipped without node; the file is checked as a module), and outside comments and strings: no `console.log`, no `beforeEvents`, no `worldInitialize`, no `world.` call at the top level (brace depth 0) other than `.subscribe(` |
+| `deploy` | `"deploy": "ok"`, optional `"behavior_packs": [..]`, `"resource_packs": [..]` | `.course/deploy.json` says `ok` and lists those pack directories; SKIP if the file is absent, fail if it is empty or half-written |
+| `game` | `"game": ID` | `.course/game-check ID` exits 0; SKIP if the hook is absent. The reason after `[course] FAIL ID:` in the hook's output is what the learner sees |
 
 `PATH` is dotted with `[N]` indexes: `header.uuid`, `modules[0].type`,
 `dependencies[1].version`. A `SPEC` for `same` is `{"file": F, "path": P}`
@@ -138,6 +145,7 @@ lesson watch              re-check on every save; keys h hint, a answer, n next,
 lesson uuid               print a fresh UUID
 ```
 
+`ID` is a lesson id, its number or a prefix (`01-manifest`, `1`, `01-`).
 Options for authoring: `lesson check ID --upto N` checks only steps 1..N,
 `--quiet` prints nothing and only sets the exit code.
 
@@ -149,13 +157,17 @@ Written by the checker, read by the dashboard.
 {
   "current": "01-manifest",
   "lessons": {
-    "01-manifest": {"steps": 5, "passed_steps": 2, "done": false, "fails": {"3": 2}, "at": "2026-09-06T14:02:11+0000"}
+    "01-manifest": {"steps": 5, "passed_steps": 2, "high": 2, "done": false, "fails": {"3": 2}, "at": "2026-09-06T14:02:11+0000"}
   }
 }
 ```
 
-`fails` counts consecutive failed checks per step and resets when the step
-passes; the hint prints automatically at 2.
+`fails` counts failed attempts per step (`lesson check`, and saves under
+`lesson watch`; the watch start-up, deploy updates, `lesson` and `lesson hint`
+do not count) and resets when the step passes; the hint prints automatically
+at 2. `high` is the most steps that have passed in one run: a file that stops
+parsing sends `passed_steps` back to 0, and `lesson answer` uses `high` to
+keep showing the step the learner had reached.
 
 ## deploy.json
 
@@ -175,7 +187,10 @@ attempt. Same shape as this repo's `state/deploy.json` plus the pack lists.
 ```
 
 `status` is `ok` or `failed`; `detail` is the error text the learner sees.
-Pack lists hold the directory names under `packs/` that were installed.
+Pack lists hold the directory names under `packs/` that were installed. The
+sidecar writes the file atomically (to a temporary name, then rename): the
+checker treats an empty or half-written file as a failed step, never as
+absent.
 
 ## In-game checks
 
@@ -183,9 +198,12 @@ The platform provides `.course/game-check`, an executable that takes a lesson
 id, sends `scriptevent course:check <id>` to the learner's server console,
 watches the container log for up to twenty seconds for a line containing
 `[course] PASS <id>` or `[course] FAIL <id>: reason`, prints that line, and
-exits 0 on PASS. `scriptevent course:ping` answers `[course] PASS ping` so the
+exits 0 on PASS. The checker reads that line back from the hook's output and
+shows the learner the reason after `FAIL <id>:`; anything else the hook prints
+is ignored. `scriptevent course:ping` answers `[course] PASS ping` so the
 platform can tell the grader is loaded. The grader is
-`course/grader_bp/`; its checks are keyed by lesson id in `scripts/main.js`.
+`course/grader_bp/`; its checks are keyed by lesson id in `scripts/main.js`,
+and `build-tags` refuses a lesson whose `game` id has no check there.
 The server must run with content logging to the console enabled, or the
 grader's output never reaches the log.
 
@@ -195,8 +213,9 @@ grader's output never reaches the log.
 paths, copied over the workspace to produce the state after step N. A step
 with no overlay directory changes nothing (a check-only step, such as "see it
 in the game"). `build-tags` replays the template, then every lesson's
-overlays in order, verifying after each step that `lesson check ID --upto N`
-passes, and fetches the resulting tags into the target workspace. A solution
+overlays in order, verifying after each step that steps 1..N of the lesson
+pass, and fetches the resulting tags into the target workspace, removing
+stale `lesson/*` tags there and refreshing its `lessons/` copy. A solution
 that fails its own checks stops the build.
 
 ## Lesson ids

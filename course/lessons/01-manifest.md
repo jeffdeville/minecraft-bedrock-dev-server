@@ -113,8 +113,8 @@ run `lesson uuid` once more and replace the second one.
 <!-- check
 {"deploy": "ok", "behavior_packs": ["kid_bp"], "msg": "the last deploy did not install kid_bp; the deploy message on your course page says why"}
 -->
-Save. Within about fifteen seconds your course page shows a new deploy with
-your pack's name in it. That is the whole trip: you saved a file, the server
+Save. Within about fifteen seconds your course page shows a new deploy that
+lists `kid_bp`. That is the whole trip: you saved a file, the server
 read your ID card, and it now knows your pack exists. It does nothing yet.
 That changes in the next lesson.
 

@@ -3,27 +3,44 @@
 
 Create a learner workspace: the template, a copy of every lesson, a git
 repository with one commit, and the solution tags. The platform's
-provisioner runs this; so does anyone testing lessons on a laptop.
+provisioner runs this; so does anyone testing lessons on a laptop. Nothing
+is left behind when it fails, so it can simply be run again.
 """
 
-import subprocess
+import shutil
 import sys
 from pathlib import Path
 
-from courselib import COURSE, die, git, stage_workspace
+from courselib import COURSE, build_tags, die, init_repo, stage_workspace
+
+
+def remove_contents(ws):
+    for p in ws.iterdir():
+        if p.is_dir() and not p.is_symlink():
+            shutil.rmtree(p, ignore_errors=True)
+        else:
+            p.unlink()
 
 
 def main(argv):
     if len(argv) != 1 or argv[0].startswith("-"):
         die(__doc__.strip())
     ws = Path(argv[0]).resolve()
-    if ws.exists() and any(ws.iterdir()):
+    if ws.exists() and not ws.is_dir():
+        die(f"{ws} exists and is not a directory")
+    if ws.is_dir() and any(ws.iterdir()):
         die(f"{ws} exists and is not empty")
-    stage_workspace(ws)
-    git(ws, "init", "-q", "-b", "main")
-    git(ws, "add", "-A")
-    git(ws, "commit", "-q", "-m", "Course workspace")
-    subprocess.run([sys.executable, str(COURSE / "bin" / "build-tags"), str(ws)], check=True)
+    created = not ws.exists()
+    try:
+        stage_workspace(ws)
+        init_repo(ws, "Course workspace")
+        build_tags(ws)
+    except BaseException:
+        if created:
+            shutil.rmtree(ws, ignore_errors=True)
+        else:
+            remove_contents(ws)
+        raise
     print(f"workspace ready at {ws}")
     print(f"  cd {ws} && PATH={COURSE / 'bin'}:$PATH lesson")
     return 0

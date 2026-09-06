@@ -148,5 +148,9 @@ it. `course/FORMAT.md` is the contract between the two and the place to look
 before touching either. The plan is `docs/2026-09-06-guided-course-plan.md`.
 Test content on a laptop with `course/bin/new-workspace DIR`, which builds a
 learner workspace and verifies every solution against its lesson's checks;
-nothing in `course/` needs the server. `course/bin/lesson` is stdlib Python
-like the rest of the server-side tooling.
+nothing in `course/` needs the server. Everything in `course/bin/` is stdlib
+Python (the same rule as `install-packs.py`). None of it belongs to the two
+machines above: `lesson` runs in the learner's editor terminal on the course
+box, `new-workspace` and `build-tags` run wherever workspaces are provisioned
+(the course box, or a laptop for testing). `lesson` stays one self-contained
+file; the other two import it as a module through `courselib.py`.

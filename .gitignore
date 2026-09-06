@@ -12,6 +12,8 @@ addons/
 # Editors / OS / tools
 .DS_Store
 .vscode/
+# ...except the learner workspace template, whose editor settings are content
+!course/templates/workspace/.vscode/
 *.swp
 __pycache__/
 .serena/
