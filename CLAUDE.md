@@ -139,3 +139,14 @@ value changes. If the variable is empty, `mc` falls back to ssh's defaults.
 - `bin/setup-client.sh` is the only place that assumes brew or apt.
 - Per-world add-on mapping is a documented stretch goal (README "Roadmap");
   keep install and activate separate in `install-packs.py` so it stays cheap.
+
+## The guided course (branch `guided-course`)
+
+`course/` is the lesson content and checker for a guided Bedrock coding
+course; `platform/` (when it exists) is the one-box server package that hosts
+it. `course/FORMAT.md` is the contract between the two and the place to look
+before touching either. The plan is `docs/2026-09-06-guided-course-plan.md`.
+Test content on a laptop with `course/bin/new-workspace DIR`, which builds a
+learner workspace and verifies every solution against its lesson's checks;
+nothing in `course/` needs the server. `course/bin/lesson` is stdlib Python
+like the rest of the server-side tooling.

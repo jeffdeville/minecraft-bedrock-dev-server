@@ -1,0 +1,17 @@
+{
+  "format_version": 2,
+  "header": {
+    "name": "Wizard Pack",
+    "description": "My first behavior pack",
+    "uuid": "3a1f6b2c-9d4e-4a7b-8c1d-5e2f7a9b0c31",
+    "version": [1, 0, 0],
+    "min_engine_version": [1, 26, 0]
+  },
+  "modules": [
+    {
+      "type": "data",
+      "uuid": "c7d2e8f1-4b3a-4e6c-9a5b-1f0e2d3c4b52",
+      "version": [1, 0, 0]
+    }
+  ]
+}
