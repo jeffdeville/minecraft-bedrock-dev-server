@@ -10,7 +10,7 @@ resource pack), and the learner needs operator permission on their server to
 type `/give`, `/kill`, `/summon` (the platform sets this; if a command says
 "no permission", that is ours to fix, not theirs).
 
-- **00-tour** — Before: "Which folder do you think makes the words in chat, and which makes the Wand's picture?" Watch for: joining before the status bar says live. Payoff: chat says *My Pack is on!* on join, and `/give @s kid:wand` puts a Wand with a picture in the hotbar.
+- **00-tour** — Ask: what does a creeper *do*, and what does it *look like*? That is the behavior pack and the resource pack. Watch for: the phone join (address `redstone.clny.dev`, the port from the lesson, Xbox sign-in the first time). Payoff: chat says *My Pack is on!*, then `/give @s kid:wand` puts a Wand with a picture and a name in their hand; the Try-this renames it and the Wand still works.
 - **01-rename-a-diamond** — Before: "Where will the new name show up?" Watch for: spaces around the `=`, quotes around the name, tapping the diamond in the hotbar (there is no hover on a phone). Payoff: a selected diamond shows their name above the hotbar. Then: "rename one more thing and show me".
 - **02-candy-dirt** — Before: "Will every dirt block change, or only new ones?" Watch for: the folder spelled `block`, the file pasted as `dirt copy.png`. Payoff: all dirt is pink. Ask: "why did that need no code?"
 - **03-say-hello** — Before: "When will your words appear: when the server starts, when you join, or both?" Watch for: a deleted quote (the panel shows a red box; that is a quote or bracket, not a reason to start over). Payoff: their words in chat on join, and again after `/kill @s`. Ask: "what is the event, and what runs?"

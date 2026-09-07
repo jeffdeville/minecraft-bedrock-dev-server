@@ -81,6 +81,19 @@ def main(argv):
     for d in (home, home / "data", home / "state"):
         d.mkdir(parents=True, exist_ok=True)
 
+    # 0. what the lessons tell this learner to type to join their server
+    course_dir = ws / ".course"
+    course_dir.mkdir(parents=True, exist_ok=True)
+    vars_path = course_dir / "vars.json"
+    try:
+        vars_ = json.loads(vars_path.read_text()) if vars_path.exists() else {}
+    except ValueError:
+        vars_ = {}
+    site = os.environ.get("SITE", "")
+    address = re.sub(r"^https?://", "", site).split("/")[0].split(":")[0] or "your server's address"
+    vars_.update({"SERVER_ADDRESS": address, "SERVER_PORT": str(port), "LEARNER": name})
+    vars_path.write_text(json.dumps(vars_, indent=2) + "\n")
+
     # 1. workspace
     if not (ws / ".git").is_dir():
         if ws.exists():
@@ -91,8 +104,6 @@ def main(argv):
         run(sys.executable, APP / "course" / "bin" / "build-tags", ws)
 
     # 2. the in-game check hook: asks the control plane, which has the socket
-    course_dir = ws / ".course"
-    course_dir.mkdir(exist_ok=True)
     hook = course_dir / "game-check"
     write_if_changed(hook, """#!/bin/sh
 # Written by the platform. `game-check <lesson-id>` asks the control plane to

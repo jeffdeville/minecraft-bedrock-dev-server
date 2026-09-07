@@ -66,6 +66,11 @@ Standard variables, all generated as fresh UUIDs: `BP_HEADER_UUID`,
 `SPARE_UUID_1` to `SPARE_UUID_4`. A file whose rendered text is identical to
 its unrendered text is copied as is, so binaries are safe.
 
+Lesson files are rendered too, so a lesson can tell the learner exactly
+what to type to reach *their* server: `{{SERVER_ADDRESS}}`,
+`{{SERVER_PORT}}` and `{{LEARNER}}` are set by the platform's provisioner
+(a laptop workspace gets readable defaults).
+
 ## Solutions and "the answer"
 
 Solutions live in git tags in the workspace, built by `course/bin/build-tags`:
@@ -149,8 +154,14 @@ Rules:
   The checker refuses a check without a `msg`, with a key it does not know,
   or with a file outside the workspace.
 - One `<details><summary>Hint</summary>…</details>` per step.
+- Teach, do not allude. If a lesson names a distinction (two halves, event
+  and effect, key and value), it shows one concrete example of each side
+  and one thing that happens when they are confused, before asking the
+  learner to tell them apart. A tour that says "kid_bp is the code half"
+  has not taught what a behavior pack is.
 - Reading load: the panel is about 300 pixels wide. Idea ≤ 100 words with a
-  **Predict:** line; ≤ 40 words before a code block and ≤ 20 after; code
+  **Predict:** line (the tour may run longer, in short paragraphs, because
+  it carries the one distinction everything else rests on); ≤ 40 words before a code block and ≤ 20 after; code
   lines ≤ 44 characters so they do not scroll sideways; a snippet that goes
   after a `]` or `}` starts with the comma the learner must add.
 - Words: say "save" only when autosave is off (it is on); never point at

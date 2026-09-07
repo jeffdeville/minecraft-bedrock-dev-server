@@ -57,6 +57,9 @@ def lesson_paths():
 PLACEHOLDER_RE = re.compile(r"\{\{([A-Z][A-Z0-9_]*)\}\}")
 VAR_NAMES = ["BP_HEADER_UUID", "BP_DATA_UUID", "BP_SCRIPT_UUID", "RP_HEADER_UUID", "RP_MODULE_UUID",
              "SPARE_UUID_1", "SPARE_UUID_2", "SPARE_UUID_3", "SPARE_UUID_4"]
+# Non-UUID values the lessons may mention; the platform's provisioner sets the
+# real ones, a laptop workspace gets these so the text still reads.
+VAR_DEFAULTS = {"SERVER_ADDRESS": "your server's address", "SERVER_PORT": "19132", "LEARNER": "you"}
 
 
 def load_vars(ws):
@@ -71,6 +74,10 @@ def load_vars(ws):
     missing = [k for k in VAR_NAMES if k not in vars_]
     for k in missing:
         vars_[k] = str(uuid.uuid4())
+    for k, v in VAR_DEFAULTS.items():
+        if k not in vars_:
+            vars_[k] = v
+            missing.append(k)
     if missing:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(vars_, indent=2) + "\n", encoding="utf-8")
@@ -109,13 +116,15 @@ def copy_tree(src, dst, vars_=None):
         shutil.copy2(p, target)
 
 
-def refresh_lessons(ws):
-    """Make ws/lessons/ an exact copy of course/lessons/."""
+def refresh_lessons(ws, vars_=None):
+    """Make ws/lessons/ a copy of course/lessons/, with {{PLACEHOLDERS}} rendered
+    (the server address and port a lesson tells the learner to type)."""
     lessons = ws / "lessons"
     lessons.mkdir(parents=True, exist_ok=True)
     keep = {p.name for p in lesson_paths()}
     for p in lesson_paths():
-        shutil.copy2(p, lessons / p.name)
+        text = p.read_text(encoding="utf-8")
+        (lessons / p.name).write_text(render(text, vars_) if vars_ else text, encoding="utf-8")
     for p in lessons.glob("*.md"):
         if p.name not in keep:
             p.unlink()
@@ -156,7 +165,7 @@ def stage_workspace(dst, vars_):
     """Lay out a fresh workspace: template (rendered) plus a copy of every lesson."""
     dst.mkdir(parents=True, exist_ok=True)
     copy_tree(COURSE / "templates" / "workspace", dst, vars_)
-    refresh_lessons(dst)
+    refresh_lessons(dst, vars_)
 
 
 def init_repo(ws, message):
@@ -221,6 +230,6 @@ def build_tags(ws, verify=True):
             if tag not in built:
                 git(ws, "tag", "-d", tag)
         git(ws, "fetch", "-q", "--no-tags", "--force", str(tmp), "refs/tags/*:refs/tags/*")
-    refresh_lessons(ws)
+    refresh_lessons(ws, vars_)
     refresh_template(ws, vars_)
     return len(built) // 2
