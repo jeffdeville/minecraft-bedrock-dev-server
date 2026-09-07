@@ -1,0 +1,21 @@
+# SITE comes from /opt/redstone/.env: http://<ip> until DNS exists, then
+# https://redstone.clny.dev and Caddy fetches the certificate itself.
+{$SITE} {
+	encode gzip
+
+	# Editors. The control plane says who the cookie belongs to and whether
+	# they may see this learner's path; the generated snippets route by path.
+	handle /u/* {
+		forward_auth redstone-control:8000 {
+			uri /auth/check
+			copy_headers X-Learner
+		}
+		import /etc/caddy/learners/*.caddy
+		respond "no such learner" 404
+	}
+
+	# Login, dashboard, admin, the in-game check endpoint.
+	handle {
+		reverse_proxy redstone-control:8000
+	}
+}

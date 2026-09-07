@@ -1,0 +1,83 @@
+# One learner's stack. Started by the control plane as
+#   docker compose -p redstone-<name> --env-file /opt/redstone/learners/<name>/.env -f this-file up -d --build
+# The env file (written by control/provision.py) supplies LEARNER, PORT, PORT6,
+# ROOT, TOKEN, VERSION, BEDROCK_IMAGE_TAG, SETTLE, LEVEL_NAME.
+
+services:
+  bds:
+    image: itzg/minecraft-bedrock-server:${BEDROCK_IMAGE_TAG:-2026.8.2}
+    container_name: redstone-${LEARNER}-bds
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    ports:
+      - "${PORT}:${PORT}/udp"
+      - "${PORT6}:${PORT6}/udp"
+    environment:
+      EULA: "TRUE"
+      VERSION: ${VERSION}
+      SERVER_NAME: "${LEARNER}'s world"
+      SERVER_PORT: ${PORT}
+      SERVER_PORT_V6: ${PORT6}
+      LEVEL_NAME: ${LEVEL_NAME:-world}
+      GAMEMODE: creative
+      DIFFICULTY: easy
+      ALLOW_CHEATS: "true"
+      MAX_PLAYERS: 4
+      VIEW_DISTANCE: 10
+      ONLINE_MODE: "true"
+      # Packs are installed by the sidecar; the image must not fight it.
+      FORCE_PACK_COPY: "false"
+      # Without this the grader's console.warn lines never reach the log and
+      # the in-game check can never pass.
+      CONTENT_LOG_CONSOLE_OUTPUT_ENABLED: "true"
+    volumes:
+      - ${ROOT}/learners/${LEARNER}/data:/data
+    deploy:
+      resources:
+        limits:
+          memory: ${BDS_MEMORY:-1g}
+    networks:
+      - redstone
+
+  code:
+    build: ${ROOT}/app/platform/code-server
+    image: redstone/code-server
+    container_name: redstone-${LEARNER}-code
+    restart: unless-stopped
+    environment:
+      COURSE_LEARNER: ${LEARNER}
+      COURSE_TOKEN: ${TOKEN}
+      COURSE_CONTROL: http://redstone-control:8000
+    volumes:
+      - ${ROOT}/learners/${LEARNER}/workspace:/workspace
+      - ${ROOT}/app/course:/course:ro
+    networks:
+      - redstone
+
+  deploy:
+    build: ${ROOT}/app/platform/sidecar
+    image: redstone/sidecar
+    container_name: redstone-${LEARNER}-deploy
+    restart: unless-stopped
+    # No Docker socket here: after installing packs it asks the control plane
+    # to restart the server, authenticated with the learner's token.
+    user: "1000:1000"
+    environment:
+      LEARNER: ${LEARNER}
+      LEVEL_NAME: ${LEVEL_NAME:-world}
+      SETTLE: ${SETTLE:-2}
+      COURSE_TOKEN: ${TOKEN}
+      COURSE_CONTROL: http://redstone-control:8000
+    volumes:
+      - ${ROOT}/learners/${LEARNER}/workspace:/workspace
+      - ${ROOT}/learners/${LEARNER}/data:/data
+      - ${ROOT}/learners/${LEARNER}/state:/state
+      - ${ROOT}/app/bin:/app/bin:ro
+      - ${ROOT}/app/course/grader_bp:/grader_bp:ro
+    networks:
+      - redstone
+
+networks:
+  redstone:
+    external: true
