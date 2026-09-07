@@ -71,6 +71,10 @@
       {
         "command": "redstone.showLogs",
         "title": "Course: Show the server and deploy logs"
+      },
+      {
+        "command": "redstone.allowlist",
+        "title": "Course: Who can join my server"
       }
     ],
     "configuration": {

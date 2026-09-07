@@ -99,7 +99,7 @@
     }
 
     parts.push(`<footer>
-      ${button("openLesson", "Open the lesson text", "link")}
+      ${button("openLesson", "Open the lesson text", "link")} · ${button("allowlist", "Who can join my server", "link")}
       <span class="muted"> · ${state.lessons.filter((l) => l.done).length} of ${state.lessons.length} lessons done</span>
     </footer>`);
 

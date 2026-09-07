@@ -6,7 +6,7 @@ import * as fs from "fs";
 import * as path from "path";
 import MarkdownIt from "markdown-it";
 import * as vscode from "vscode";
-import { DeployLog, ServerLog } from "./logs";
+import { DeployLog, ServerLog, controlRequest } from "./logs";
 
 interface Check {
   step: number;
@@ -347,6 +347,7 @@ class Course {
         case "next": void this.next(); break;
         case "game": void this.gameCheck(); break;
         case "openLesson": void this.openLesson(); break;
+        case "allowlist": void vscode.commands.executeCommand("redstone.allowlist"); break;
         case "openFile": if (m.arg) { void this.openFile(m.arg); } break;
         case "dismiss": this.notice = undefined; this.answerText = undefined; this.render(); break;
       }
@@ -444,12 +445,11 @@ export function activate(ctx: vscode.ExtensionContext): void {
 
   // The bottom panel: the sidecar's deploy log and the server's own log.
   const cfg = vscode.workspace.getConfiguration("redstone");
+  const control = cfg.get<string>("control") || process.env.COURSE_CONTROL || "";
+  const learner = process.env.COURSE_LEARNER || "";
+  const token = cfg.get<string>("token") || process.env.COURSE_TOKEN || "";
   const deployLog = new DeployLog(ws);
-  const serverLog = new ServerLog(
-    cfg.get<string>("control") || process.env.COURSE_CONTROL || "",
-    process.env.COURSE_LEARNER || "",
-    cfg.get<string>("token") || process.env.COURSE_TOKEN || "",
-  );
+  const serverLog = new ServerLog(control, learner, token);
   const deployLogWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(ws, ".course/deploy.log"));
   deployLogWatcher.onDidChange(() => deployLog.catchUp());
   deployLogWatcher.onDidCreate(() => deployLog.catchUp());
@@ -461,6 +461,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
     serverLog.channel,
     { dispose: () => { clearInterval(deployLogPoll); serverLog.stop(); } },
     vscode.commands.registerCommand("redstone.showLogs", () => { serverLog.channel.show(true); }),
+    vscode.commands.registerCommand("redstone.allowlist", () => allowlist(control, learner, token)),
   );
 
   logEvent(ws, { event: "panel", source: "open" });
@@ -468,6 +469,47 @@ export function activate(ctx: vscode.ExtensionContext): void {
   // Layout on open: explorer left, the Course panel right, the server log below.
   void vscode.commands.executeCommand("redstone.lesson.focus");
   serverLog.channel.show(true);
+}
+
+/** Who can join my server: a quick pick of the current gamertags, add or remove one. */
+async function allowlist(control: string, learner: string, token: string): Promise<void> {
+  if (!control || !learner || !token) {
+    void vscode.window.showInformationMessage("The list of who can join is managed on the course page for this server.");
+    return;
+  }
+  const url = `${control}/api/allowlist/${learner}`;
+  try {
+    const current = JSON.parse(await controlRequest(url, token)) as { allowed: string[] };
+    const items: vscode.QuickPickItem[] = [
+      { label: "$(add) Allow a new player…", description: "type their gamertag" },
+      ...current.allowed.map((t) => ({ label: t, description: "allowed · pick to remove" })),
+    ];
+    const pick = await vscode.window.showQuickPick(items, {
+      title: "Who can join my server",
+      placeHolder: current.allowed.length ? `${current.allowed.length} player(s) can join` : "Nobody can join yet",
+    });
+    if (!pick) {
+      return;
+    }
+    let gamertag: string | undefined;
+    let action = "add";
+    if (pick.label.startsWith("$(add)")) {
+      gamertag = await vscode.window.showInputBox({ title: "Gamertag to allow", prompt: "Exactly as it shows in Minecraft", validateInput: (v) => (/^[A-Za-z0-9 ]{1,16}$/.test(v.trim()) ? undefined : "1 to 16 letters, digits or spaces") });
+    } else {
+      const ok = await vscode.window.showWarningMessage(`Remove ${pick.label}? They will not be able to join.`, { modal: true }, "Remove");
+      if (ok === "Remove") {
+        gamertag = pick.label;
+        action = "remove";
+      }
+    }
+    if (!gamertag) {
+      return;
+    }
+    const result = JSON.parse(await controlRequest(url, token, JSON.stringify({ gamertag: gamertag.trim(), action }))) as { notice: string };
+    void vscode.window.showInformationMessage(result.notice);
+  } catch (e) {
+    void vscode.window.showErrorMessage(`Could not reach the course server: ${e}`);
+  }
 }
 
 export function deactivate(): void {}

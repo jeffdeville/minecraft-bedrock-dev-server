@@ -108,10 +108,20 @@ export class ServerLog {
   }
 }
 
-function fetchText(url: string, token: string): Promise<string> {
+/** GET, or POST a JSON body, to the control plane with the learner's token. */
+export function controlRequest(url: string, token: string, body?: string): Promise<string> {
+  return fetchText(url, token, body);
+}
+
+function fetchText(url: string, token: string, body?: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const lib = url.startsWith("https:") ? https : http;
-    const req = lib.get(url, { headers: { Authorization: `Bearer ${token}` }, timeout: 10_000 }, (res) => {
+    const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
+    if (body !== undefined) {
+      headers["Content-Type"] = "application/json";
+      headers["Content-Length"] = String(Buffer.byteLength(body));
+    }
+    const req = lib.request(url, { method: body === undefined ? "GET" : "POST", headers, timeout: 10_000 }, (res) => {
       const chunks: Buffer[] = [];
       res.on("data", (c: Buffer) => chunks.push(c));
       res.on("end", () => {
@@ -125,5 +135,6 @@ function fetchText(url: string, token: string): Promise<string> {
     });
     req.on("timeout", () => req.destroy(new Error("timeout")));
     req.on("error", reject);
+    req.end(body);
   });
 }

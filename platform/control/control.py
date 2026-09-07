@@ -15,6 +15,8 @@
                            for "Server started"
   /api/logs/<name>         bearer-token endpoint the editor extension polls for
                            the learner's server log (docker logs --timestamps)
+  /api/allowlist/<name>    bearer-token: GET the gamertags allowed to join this
+                           learner's server, POST {gamertag, action} to change
 
 Users, sessions and the per-learner token and port live in
 $ROOT/control.db (SQLite). Provisioning is provision.py in a thread; its
@@ -73,6 +75,12 @@ def init_db():
                 token TEXT,
                 port INTEGER,
                 created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS allowed (
+                learner TEXT NOT NULL,
+                gamertag TEXT NOT NULL,
+                added_at TEXT NOT NULL,
+                PRIMARY KEY (learner, gamertag)
             );
         """)
         if not conn.execute("SELECT 1 FROM users WHERE is_admin = 1").fetchone():
@@ -169,6 +177,55 @@ def game_check(name, lesson_id):
     return False, f"[course] FAIL {lesson_id}: the grader did not answer in {GAME_WAIT}s; if your server just restarted, wait and try again"
 
 
+GAMERTAG_RE = re.compile(r"^[A-Za-z0-9 ]{1,16}$")
+
+
+def allowed_players(conn, name):
+    return [r["gamertag"] for r in conn.execute(
+        "SELECT gamertag FROM allowed WHERE learner = ? ORDER BY gamertag", (name,))]
+
+
+def write_allowlist(name):
+    """Write the learner's allowlist.json from the database and tell the server
+    to reload it. Only players on it can join; they join as operators on their
+    own server. BDS fills in xuids itself when a listed player first joins,
+    so the file must stay writable by the server's uid."""
+    with db() as conn:
+        tags = allowed_players(conn, name)
+    data_dir = ROOT / "learners" / name / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    path = data_dir / "allowlist.json"
+    known = {}
+    try:
+        for entry in json.loads(path.read_text()):
+            if isinstance(entry, dict) and entry.get("xuid"):
+                known[entry.get("name", "").lower()] = entry["xuid"]
+    except (OSError, ValueError):
+        pass
+    entries = []
+    for tag in tags:
+        e = {"name": tag, "ignoresPlayerLimit": False}
+        if tag.lower() in known:
+            e["xuid"] = known[tag.lower()]
+        entries.append(e)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(entries, indent=2) + "\n")
+    os.replace(tmp, path)
+    try:
+        os.chown(path, 1000, 1000)
+    except OSError:
+        pass
+    c = f"redstone-{name}-bds"
+    if container_state(c) == "running":
+        console(c, "allowlist", "reload")
+    return tags
+
+
+def allowed_for(name):
+    with db() as conn:
+        return allowed_players(conn, name)
+
+
 def restart_server(name, wait=True):
     """Warn players, restart the learner's server, wait for it to come up."""
     c = f"redstone-{name}-bds"
@@ -261,6 +318,7 @@ def learner_view(row):
         "done": sum(1 for v in (progress.get("lessons") or {}).values() if v.get("done")),
         "total": len(lessons),
         "deploy": deploy,
+        "allowed": allowed_for(row["name"]),
         "provisioning": bool(t and t.is_alive()),
         "provision_log": log.read_text()[-3000:] if log.exists() else "",
     }
@@ -309,6 +367,12 @@ def render_learner(v, is_admin=False, notice=""):
     server_line = f'<span class="{"ok" if server == "running" else "bad"}">{e(server)}</span>'
     who = e(v["name"])
     step = f'step {v["step"]} of {v["steps"]}' if v["steps"] else "not started"
+    nobody = "<p class=\"bad\">Nobody yet: add a gamertag below, or nobody can join.</p>"
+    allow_rows = "".join(
+        f'<p>{e(t)} <form class="inline" method="post" action="/allowlist"><input type="hidden" name="learner" value="{who}">'
+        f'<input type="hidden" name="action" value="remove"><input type="hidden" name="gamertag" value="{e(t)}">'
+        f'<button class="small">remove</button></form></p>'
+        for t in v["allowed"]) or nobody
     body = f"""
 <div class="card">
   <p><a class="button primary" href="{e(v['editor'])}" target="_blank">Open the editor</a>
@@ -322,6 +386,14 @@ def render_learner(v, is_admin=False, notice=""):
   <form class="inline" method="post" action="/game-check"><input type="hidden" name="learner" value="{who}">
      <input type="hidden" name="lesson" value="{e(v['current'])}"><button>Run the in-game check for {e(v['current'])}</button></form>
   {f'<p><b>{e(notice)}</b></p>' if notice else ''}
+</div>
+<div class="card">
+  <p><b>Who can join this server</b> <span class="muted">(only these gamertags; they join as operators)</span></p>
+  {allow_rows}
+  <form class="inline" method="post" action="/allowlist"><input type="hidden" name="learner" value="{who}">
+     <input type="hidden" name="action" value="add">
+     <label>gamertag <input type="text" name="gamertag" maxlength="16" required></label>
+     <button class="primary">Allow</button></form>
 </div>
 """
     if v["provisioning"] or (is_admin and v["provision_log"]):
@@ -395,6 +467,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.api_game_check(path)
         if path.startswith("/api/logs/"):
             return self.api_logs(path, query)
+        if path.startswith("/api/allowlist/"):
+            return self.api_allowlist(path, "GET")
         if path == "/login":
             return self.send_html(page("Log in", LOGIN_FORM))
         if path == "/logout":
@@ -422,6 +496,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.redirect("/", self.cookie_header(make_cookie(f["name"].strip().lower()), SESSION_SECONDS))
         if path.startswith("/api/restart/"):
             return self.api_restart(path)
+        if path.startswith("/api/allowlist/"):
+            return self.api_allowlist(path, "POST")
         user = self.user()
         if not user:
             return self.redirect("/login")
@@ -433,6 +509,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_text("forbidden", 403)
             threading.Thread(target=restart_server, args=(name, False), daemon=True).start()
             return self.redirect(f"/?learner={name}&notice=restarting" if admin else "/?notice=restarting")
+        if path == "/allowlist":
+            name = self.owned(user, admin, f.get("learner"))
+            if not name:
+                return self.send_text("forbidden", 403)
+            notice = self.change_allowlist(name, f.get("action", "add"), f.get("gamertag", ""))
+            q = urllib.parse.urlencode({"learner": name, "notice": notice})
+            return self.redirect(f"/?{q}")
         if path == "/game-check":
             name = self.owned(user, admin, f.get("learner"))
             if not name:
@@ -513,6 +596,48 @@ class Handler(BaseHTTPRequestHandler):
             args += ["--since", since]
         r = docker(*args, c, timeout=15)
         self.send_text(r.stdout + r.stderr if r.returncode == 0 else "", 200)
+
+    def change_allowlist(self, name, action, gamertag):
+        """Add or remove one gamertag; returns a sentence for the notice."""
+        gamertag = gamertag.strip()
+        if not GAMERTAG_RE.match(gamertag):
+            return "a gamertag is 1 to 16 letters, digits or spaces"
+        with db() as conn:
+            if action == "remove":
+                conn.execute("DELETE FROM allowed WHERE learner = ? AND lower(gamertag) = lower(?)", (name, gamertag))
+            else:
+                conn.execute("INSERT OR IGNORE INTO allowed (learner, gamertag, added_at) VALUES (?, ?, ?)",
+                             (name, gamertag, time.strftime("%Y-%m-%dT%H:%M:%S%z")))
+        tags = write_allowlist(name)
+        verb = "can no longer join" if action == "remove" else "can now join"
+        return f"{gamertag} {verb} {name}'s server ({len(tags)} player(s) allowed)"
+
+    def api_allowlist(self, path, method):
+        """GET: the list. POST (form or JSON): gamertag and action add|remove. Bearer token."""
+        parts = path.split("/")
+        if len(parts) != 4 or not NAME_RE.match(parts[3]):
+            return self.send_text("usage: /api/allowlist/<learner>", 400)
+        name = parts[3]
+        if not self.token_owner(name):
+            return self.send_text("forbidden", 403)
+        notice = ""
+        if method == "POST":
+            n = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(n).decode() if n else ""
+            if self.headers.get("Content-Type", "").startswith("application/json"):
+                try:
+                    body = json.loads(raw or "{}")
+                except ValueError:
+                    body = {}
+            else:
+                body = {k: v[0] for k, v in urllib.parse.parse_qs(raw).items()}
+            notice = self.change_allowlist(name, str(body.get("action", "add")), str(body.get("gamertag", "")))
+        data = json.dumps({"learner": name, "allowed": allowed_for(name), "notice": notice}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def api_game_check(self, path):
         parts = path.split("/")

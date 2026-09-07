@@ -29,6 +29,9 @@ services:
       MAX_PLAYERS: 4
       VIEW_DISTANCE: 10
       ONLINE_MODE: "true"
+      # Only gamertags on data/allowlist.json may join (the control plane
+      # writes it from the dashboard); everyone on it is an operator.
+      ALLOW_LIST: "true"
       # Packs are installed by the sidecar; the image must not fight it.
       FORCE_PACK_COPY: "false"
       # The learner's resource pack applies on join without a prompt, so a
