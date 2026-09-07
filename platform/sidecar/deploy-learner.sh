@@ -65,6 +65,50 @@ echo "==> deploy $revision for $LEARNER"
 # --- 1. assemble: the learner's packs plus the grader ------------------------
 rsync -a --delete --exclude '.*' "$WS/packs/" "$ADDONS/" || { write_state failed "could not copy packs/"; exit 1; }
 rsync -a --delete /grader_bp/ "$ADDONS/grader_bp/" || { write_state failed "could not copy the grader"; exit 1; }
+# The phone caches a server's resource pack by uuid + version, so a resource
+# pack whose content changed must carry a new version or the phone keeps the
+# old pictures and names with no error anywhere. Bump the copy the server
+# gets (never the learner's file) to [1, 0, <hash of this deploy>].
+python3 - "$ADDONS" "$revision" <<'PY'
+import json, os, re, sys
+addons, rev = sys.argv[1], sys.argv[2]
+patch = int(rev[:6], 16) % 60000 if re.fullmatch(r"[0-9a-f]+", rev or "") else 1
+for name in os.listdir(addons):
+    m = os.path.join(addons, name, "manifest.json")
+    if not os.path.isfile(m):
+        continue
+    try:
+        with open(m, encoding="utf-8-sig") as f:
+            d = json.loads(re.sub(r"(?m)^\s*//.*$", "", f.read()))
+    except (OSError, ValueError):
+        continue
+    types = {mod.get("type") for mod in d.get("modules", []) if isinstance(mod, dict)}
+    if not types & {"resources", "client_data"} or not isinstance(d.get("header"), dict):
+        continue
+    v = d["header"].get("version")
+    if isinstance(v, list) and len(v) == 3:
+        d["header"]["version"] = [v[0], v[1], patch]
+        with open(m, "w", encoding="utf-8") as f:
+            json.dump(d, f, indent=2)
+        # Any behavior pack that depends on this resource pack must ask for the new version.
+        for other in os.listdir(addons):
+            om = os.path.join(addons, other, "manifest.json")
+            if other == name or not os.path.isfile(om):
+                continue
+            try:
+                with open(om, encoding="utf-8-sig") as f:
+                    od = json.loads(re.sub(r"(?m)^\s*//.*$", "", f.read()))
+            except (OSError, ValueError):
+                continue
+            changed = False
+            for dep in od.get("dependencies", []):
+                if isinstance(dep, dict) and dep.get("uuid") == d["header"].get("uuid"):
+                    dep["version"] = d["header"]["version"]
+                    changed = True
+            if changed:
+                with open(om, "w", encoding="utf-8") as f:
+                    json.dump(od, f, indent=2)
+PY
 
 # --- 2. install and activate ---------------------------------------------------
 out=$(python3 /app/bin/install-packs.py "$ADDONS" "$DATA" "$STATE" "$LEVEL" 2>&1)

@@ -1,0 +1,28 @@
+{
+  "format_version": 2,
+  "header": {
+    "name": "My Pack",
+    "description": "The code half of my pack. Made in the course.",
+    "uuid": "{{BP_HEADER_UUID}}",
+    "version": [1, 0, 0],
+    "min_engine_version": [1, 26, 0]
+  },
+  "modules": [
+    {
+      "type": "data",
+      "uuid": "{{BP_DATA_UUID}}",
+      "version": [1, 0, 0]
+    },
+    {
+      "type": "script",
+      "language": "javascript",
+      "uuid": "{{BP_SCRIPT_UUID}}",
+      "version": [1, 0, 0],
+      "entry": "scripts/main.js"
+    }
+  ],
+  "dependencies": [
+    { "uuid": "{{RP_HEADER_UUID}}", "version": [1, 0, 0] },
+    { "module_name": "@minecraft/server", "version": "2.9.0" }
+  ]
+}
