@@ -80,9 +80,12 @@ def init_db():
                 learner TEXT NOT NULL,
                 gamertag TEXT NOT NULL,
                 added_at TEXT NOT NULL,
+                xuid TEXT,
                 PRIMARY KEY (learner, gamertag)
             );
         """)
+        if "xuid" not in [r[1] for r in conn.execute("PRAGMA table_info(allowed)")]:
+            conn.execute("ALTER TABLE allowed ADD COLUMN xuid TEXT")
         if not conn.execute("SELECT 1 FROM users WHERE is_admin = 1").fetchone():
             if not ADMIN_PASSWORD:
                 sys.exit("no admin user yet and ADMIN_PASSWORD is empty")
@@ -185,6 +188,23 @@ def allowed_players(conn, name):
         "SELECT gamertag FROM allowed WHERE learner = ? ORDER BY gamertag", (name,))]
 
 
+PLAYER_SEEN_RE = re.compile(r"Player connected: ([^,]+), xuid: (\d+)")
+
+
+def seen_players(name):
+    """Gamertags and xuids the learner's server has logged joining, newest first.
+    The exact spelling the account presents, so a name can be allowed by picking
+    it rather than typing it (a one-letter typo is a silent disconnect, code 45)."""
+    c = f"redstone-{name}-bds"
+    r = docker("logs", "--tail", "3000", c, timeout=15)
+    seen = {}
+    for line in (r.stdout + r.stderr).splitlines():
+        m = PLAYER_SEEN_RE.search(line)
+        if m:
+            seen[m.group(1).strip()] = m.group(2)
+    return [{"gamertag": g, "xuid": x} for g, x in reversed(list(seen.items()))][:20]
+
+
 def write_allowlist(name):
     """Write the learner's allowlist.json from the database and tell the server
     to reload it. Only players on it can join; they join as operators on their
@@ -192,6 +212,8 @@ def write_allowlist(name):
     so the file must stay writable by the server's uid."""
     with db() as conn:
         tags = allowed_players(conn, name)
+        db_xuids = {r["gamertag"].lower(): r["xuid"] for r in conn.execute(
+            "SELECT gamertag, xuid FROM allowed WHERE learner = ? AND xuid IS NOT NULL", (name,))}
     data_dir = ROOT / "learners" / name / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
     path = data_dir / "allowlist.json"
@@ -205,8 +227,9 @@ def write_allowlist(name):
     entries = []
     for tag in tags:
         e = {"name": tag, "ignoresPlayerLimit": False}
-        if tag.lower() in known:
-            e["xuid"] = known[tag.lower()]
+        xuid = db_xuids.get(tag.lower()) or known.get(tag.lower())
+        if xuid:
+            e["xuid"] = xuid
         entries.append(e)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(entries, indent=2) + "\n")
@@ -319,6 +342,7 @@ def learner_view(row):
         "total": len(lessons),
         "deploy": deploy,
         "allowed": allowed_for(row["name"]),
+        "seen": seen_players(row["name"]),
         "provisioning": bool(t and t.is_alive()),
         "provision_log": log.read_text()[-3000:] if log.exists() else "",
     }
@@ -373,6 +397,13 @@ def render_learner(v, is_admin=False, notice=""):
         f'<input type="hidden" name="action" value="remove"><input type="hidden" name="gamertag" value="{e(t)}">'
         f'<button class="small">remove</button></form></p>'
         for t in v["allowed"]) or nobody
+    allowed_lower = {t.lower() for t in v["allowed"]}
+    seen = [p for p in v["seen"] if p["gamertag"].lower() not in allowed_lower]
+    seen_rows = ("<p class=\"muted\">Seen joining this server, not on the list:</p>" + "".join(
+        f'<p>{e(p["gamertag"])} <form class="inline" method="post" action="/allowlist"><input type="hidden" name="learner" value="{who}">'
+        f'<input type="hidden" name="action" value="add"><input type="hidden" name="gamertag" value="{e(p["gamertag"])}">'
+        f'<input type="hidden" name="xuid" value="{e(p["xuid"])}"><button class="small primary">Allow</button></form></p>'
+        for p in seen)) if seen else ""
     body = f"""
 <div class="card">
   <p><a class="button primary" href="{e(v['editor'])}" target="_blank">Open the editor</a>
@@ -390,10 +421,12 @@ def render_learner(v, is_admin=False, notice=""):
 <div class="card">
   <p><b>Who can join this server</b> <span class="muted">(only these gamertags; they join as operators)</span></p>
   {allow_rows}
+  {seen_rows}
   <form class="inline" method="post" action="/allowlist"><input type="hidden" name="learner" value="{who}">
      <input type="hidden" name="action" value="add">
      <label>gamertag <input type="text" name="gamertag" maxlength="16" required></label>
      <button class="primary">Allow</button></form>
+  <p class="muted">A player who is not on the list gets a plain connection error ending in 45, and the server logs nothing. Pick a name the server has seen rather than typing it when you can.</p>
 </div>
 """
     if v["provisioning"] or (is_admin and v["provision_log"]):
@@ -515,7 +548,7 @@ class Handler(BaseHTTPRequestHandler):
             name = self.owned(user, admin, f.get("learner"))
             if not name:
                 return self.send_text("forbidden", 403)
-            notice = self.change_allowlist(name, f.get("action", "add"), f.get("gamertag", ""))
+            notice = self.change_allowlist(name, f.get("action", "add"), f.get("gamertag", ""), f.get("xuid", ""))
             q = urllib.parse.urlencode({"learner": name, "notice": notice})
             return self.redirect(f"/?{q}")
         if path == "/game-check":
@@ -599,17 +632,20 @@ class Handler(BaseHTTPRequestHandler):
         r = docker(*args, c, timeout=15)
         self.send_text(r.stdout + r.stderr if r.returncode == 0 else "", 200)
 
-    def change_allowlist(self, name, action, gamertag):
+    def change_allowlist(self, name, action, gamertag, xuid=""):
         """Add or remove one gamertag; returns a sentence for the notice."""
         gamertag = gamertag.strip()
+        xuid = xuid.strip() if re.fullmatch(r"\d{10,20}", (xuid or "").strip()) else None
         if not GAMERTAG_RE.match(gamertag):
             return "a gamertag is 1 to 16 letters, digits or spaces"
         with db() as conn:
             if action == "remove":
                 conn.execute("DELETE FROM allowed WHERE learner = ? AND lower(gamertag) = lower(?)", (name, gamertag))
             else:
-                conn.execute("INSERT OR IGNORE INTO allowed (learner, gamertag, added_at) VALUES (?, ?, ?)",
-                             (name, gamertag, time.strftime("%Y-%m-%dT%H:%M:%S%z")))
+                conn.execute("INSERT OR IGNORE INTO allowed (learner, gamertag, added_at, xuid) VALUES (?, ?, ?, ?)",
+                             (name, gamertag, time.strftime("%Y-%m-%dT%H:%M:%S%z"), xuid))
+                if xuid:
+                    conn.execute("UPDATE allowed SET xuid = ? WHERE learner = ? AND lower(gamertag) = lower(?)", (xuid, name, gamertag))
         tags = write_allowlist(name)
         verb = "can no longer join" if action == "remove" else "can now join"
         return f"{gamertag} {verb} {name}'s server ({len(tags)} player(s) allowed)"
@@ -633,8 +669,8 @@ class Handler(BaseHTTPRequestHandler):
                     body = {}
             else:
                 body = {k: v[0] for k, v in urllib.parse.parse_qs(raw).items()}
-            notice = self.change_allowlist(name, str(body.get("action", "add")), str(body.get("gamertag", "")))
-        data = json.dumps({"learner": name, "allowed": allowed_for(name), "notice": notice}).encode()
+            notice = self.change_allowlist(name, str(body.get("action", "add")), str(body.get("gamertag", "")), str(body.get("xuid", "")))
+        data = json.dumps({"learner": name, "allowed": allowed_for(name), "seen": seen_players(name), "notice": notice}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))

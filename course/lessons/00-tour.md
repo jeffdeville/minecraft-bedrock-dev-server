@@ -89,9 +89,10 @@ Chat is the speech bubble at the top of the screen; if you missed it, tap
 the bubble to see the last lines. If the game says it cannot connect, check
 the address for typos and that the port is exactly `{{SERVER_PORT}}`. If it
 says you need to sign in, that is Xbox Live: the game needs an account to
-join any server. If it says you are **not on the list** (or "not
-allowed"), your gamertag has to be added first: the *Who can join* box on
-your course page, or ask whoever runs the course.
+join any server. If it just says it could not connect, with a number
+**45** in the details, your gamertag is not on the server's list yet, or
+it is spelled a little differently there: it has to be added in the *Who
+can join* box on your course page, or ask whoever runs the course.
 </details>
 
 ## Step 3: Hold your Wand

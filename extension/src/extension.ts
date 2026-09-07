@@ -479,9 +479,12 @@ async function allowlist(control: string, learner: string, token: string): Promi
   }
   const url = `${control}/api/allowlist/${learner}`;
   try {
-    const current = JSON.parse(await controlRequest(url, token)) as { allowed: string[] };
-    const items: vscode.QuickPickItem[] = [
-      { label: "$(add) Allow a new player…", description: "type their gamertag" },
+    const current = JSON.parse(await controlRequest(url, token)) as { allowed: string[]; seen?: { gamertag: string; xuid: string }[] };
+    const allowedLower = new Set(current.allowed.map((t) => t.toLowerCase()));
+    const seen = (current.seen ?? []).filter((p) => !allowedLower.has(p.gamertag.toLowerCase()));
+    const items: (vscode.QuickPickItem & { xuid?: string })[] = [
+      ...seen.map((p) => ({ label: p.gamertag, description: "has joined before · pick to allow", xuid: p.xuid })),
+      { label: "$(add) Allow a new player…", description: "type their gamertag exactly" },
       ...current.allowed.map((t) => ({ label: t, description: "allowed · pick to remove" })),
     ];
     const pick = await vscode.window.showQuickPick(items, {
@@ -493,7 +496,10 @@ async function allowlist(control: string, learner: string, token: string): Promi
     }
     let gamertag: string | undefined;
     let action = "add";
-    if (pick.label.startsWith("$(add)")) {
+    const xuid = (pick as { xuid?: string }).xuid ?? "";
+    if (xuid) {
+      gamertag = pick.label;
+    } else if (pick.label.startsWith("$(add)")) {
       gamertag = await vscode.window.showInputBox({ title: "Gamertag to allow", prompt: "Exactly as it shows in Minecraft", validateInput: (v) => (/^[A-Za-z0-9 ]{1,16}$/.test(v.trim()) ? undefined : "1 to 16 letters, digits or spaces") });
     } else {
       const ok = await vscode.window.showWarningMessage(`Remove ${pick.label}? They will not be able to join.`, { modal: true }, "Remove");
@@ -505,7 +511,7 @@ async function allowlist(control: string, learner: string, token: string): Promi
     if (!gamertag) {
       return;
     }
-    const result = JSON.parse(await controlRequest(url, token, JSON.stringify({ gamertag: gamertag.trim(), action }))) as { notice: string };
+    const result = JSON.parse(await controlRequest(url, token, JSON.stringify({ gamertag: gamertag.trim(), action, xuid }))) as { notice: string };
     void vscode.window.showInformationMessage(result.notice);
   } catch (e) {
     void vscode.window.showErrorMessage(`Could not reach the course server: ${e}`);
