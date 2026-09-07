@@ -112,7 +112,7 @@ def parse_frontmatter(text, name):
 # as a condition, so "exists" is only the kind when nothing more specific is present.
 KINDS = ("json", "regex", "same", "js", "deploy", "game", "exists")
 ALLOWED_KEYS = {
-    "json": {"json", "path", "exists", "equals", "not", "matches", "oneOf", "uuid", "differsFrom", "exact"},
+    "json": {"json", "path", "exists", "absent", "equals", "not", "matches", "oneOf", "uuid", "differsFrom", "exact"},
     "regex": {"regex", "pattern", "count", "exact"},
     "same": {"same"},
     "js": {"js"},
@@ -482,6 +482,10 @@ def check_json_value(c, data):
     rel, path = c["json"], c["path"]
     found, value = get_path(data, path)
     exact = c.get("exact", False)
+    if c.get("absent"):
+        if found:
+            raise Fail(c["msg"], f"{path} is there, and it should not be: it is {show(value)}")
+        return
     if not found:
         raise Fail(c["msg"], f"{path} is missing from {rel}")
     if "equals" in c and norm(value, exact) != norm(c["equals"], exact):

@@ -113,7 +113,7 @@ with a message that says so.
 | Check | Keys | Passes when |
 |---|---|---|
 | `exists` | `"exists": FILE`, optional `"png": true` | the file exists (and starts with the PNG signature) |
-| `json` | `"json": FILE, "path": PATH` plus one or more of `"exists": true`, `"equals": V`, `"not": V`, `"matches": REGEX`, `"oneOf": [..]`, `"uuid": true`, `"differsFrom": PATH` | the file parses and the value at `PATH` satisfies every condition given |
+| `json` | `"json": FILE, "path": PATH` plus one or more of `"exists": true`, `"absent": true` (passes only when the path is missing), `"equals": V`, `"not": V`, `"matches": REGEX`, `"oneOf": [..]`, `"uuid": true`, `"differsFrom": PATH` | the file parses and the value at `PATH` satisfies every condition given |
 | `regex` | `"regex": FILE, "pattern": P`, optional `"count": N` | the pattern matches (exactly N times if given) |
 | `same` | `"same": [SPEC, SPEC]` | both specs extract a value and the values are equal: text trimmed, lists and objects compared as JSON |
 | `js` | `"js": FILE` | `node --check` passes (skipped without node; the file is checked as a module), and outside comments and strings: no `console.log`, no `beforeEvents`, no `worldInitialize`, no `world.` call at the top level (brace depth 0) other than `.subscribe(` |

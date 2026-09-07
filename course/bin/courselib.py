@@ -67,6 +67,30 @@ def refresh_lessons(ws):
             p.unlink()
 
 
+# Template entries the course owns outright: refreshed in existing workspaces.
+# Everything else in the template is copied once and then belongs to the learner.
+TEMPLATE_OWNED = {".vscode", "assets"}
+
+
+def refresh_template(ws):
+    """Bring an existing workspace up to the current template without touching
+    what the learner owns: course-owned entries are overwritten, other
+    top-level entries are only added when missing."""
+    template = COURSE / "templates" / "workspace"
+    for entry in template.iterdir():
+        target = ws / entry.name
+        if entry.name in TEMPLATE_OWNED:
+            if entry.is_dir():
+                shutil.copytree(entry, target, dirs_exist_ok=True)
+            else:
+                shutil.copy2(entry, target)
+        elif not target.exists():
+            if entry.is_dir():
+                shutil.copytree(entry, target)
+            else:
+                shutil.copy2(entry, target)
+
+
 def stage_workspace(dst):
     """Lay out a fresh workspace: template plus a copy of every lesson."""
     dst.mkdir(parents=True, exist_ok=True)
@@ -136,4 +160,5 @@ def build_tags(ws, verify=True):
                 git(ws, "tag", "-d", tag)
         git(ws, "fetch", "-q", "--no-tags", "--force", str(tmp), "refs/tags/*:refs/tags/*")
     refresh_lessons(ws)
+    refresh_template(ws)
     return len(built) // 2

@@ -26,7 +26,9 @@ USER coder
 RUN code-server --install-extension /tmp/redstone-course.vsix && rm -f /tmp/redstone-course.vsix
 
 # /course is a read-only mount of the repository's course/ directory.
-ENV PATH=/course/bin:$PATH
+# code-server's bundled Node goes on PATH so the checker can `node --check`
+# a learner's script.
+ENV PATH=/course/bin:/usr/lib/code-server/lib:$PATH
 WORKDIR /workspace
 CMD ["--bind-addr", "0.0.0.0:8080", "--auth", "none", \
      "--disable-telemetry", "--disable-update-check", "--disable-workspace-trust", \

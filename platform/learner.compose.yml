@@ -28,6 +28,9 @@ services:
       ONLINE_MODE: "true"
       # Packs are installed by the sidecar; the image must not fight it.
       FORCE_PACK_COPY: "false"
+      # The learner's resource pack applies on join without a prompt, so a
+      # renamed item (lesson 3) shows up the moment they rejoin.
+      TEXTUREPACK_REQUIRED: "true"
       # Without this the grader's console.warn lines never reach the log and
       # the in-game check can never pass.
       CONTENT_LOG_CONSOLE_OUTPUT_ENABLED: "true"

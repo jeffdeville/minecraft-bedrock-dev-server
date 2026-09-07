@@ -73,12 +73,18 @@ systemctl enable redstone.service >/dev/null
 echo "==> core stack"
 "${COMPOSE[@]}" up -d --build --remove-orphans
 
+# Re-provision every learner: refreshes their lessons, solution tags and
+# workspace template, rebuilds their images, restarts what changed. Runs
+# inside the control container, where provisioning always runs.
 echo "==> learners"
 for env in "$ROOT"/learners/*/.env; do
   [ -f "$env" ] || continue
   name=$(basename "$(dirname "$env")")
+  port=$(grep '^PORT=' "$env" | cut -d= -f2)
+  token=$(grep '^TOKEN=' "$env" | cut -d= -f2)
   echo "    $name"
-  docker compose -p "redstone-$name" --env-file "$env" -f "$APP/platform/learner.compose.yml" up -d --build
+  docker exec redstone-control python3 /app/provision.py "$name" "$port" "$token" \
+    | grep -E '^(provisioned|pinned|\+ )' || echo "    !! provisioning $name failed; see above"
 done
 
 # shellcheck disable=SC1090
