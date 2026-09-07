@@ -524,11 +524,12 @@ def misplaced(ws, path):
             if not p.is_file() or ".git" in p.parts or ".course" in p.parts:
                 continue
             name = p.name.lower()
-            if p == path or (name != want and not name.startswith(want + ".") and name.split(".")[0] != stem):
+            if p == path:
                 continue
-            if name.split(".")[0] == stem and name != want and not name.startswith(want + "."):
-                continue
-            return str(p.relative_to(ws))
+            # the same name elsewhere or in another case; an extra extension
+            # (manifest.json.txt); the editor's paste name (dirt copy.png)
+            if name == want or name.startswith(want + ".") or name == f"{stem} copy{path.suffix.lower()}":
+                return str(p.relative_to(ws))
     return None
 
 
@@ -643,8 +644,9 @@ def js_code_only(text):
     return JS_NOISE_RE.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), text)
 
 
-STATEMENT_START_RE = re.compile(r"(?m)^[ \t]*(world\.|system\.afterEvents\.|system\.runInterval\(|function |let )")
-BLOCK_STARTERS = ("world.afterEvents.", "system.afterEvents.", "system.runInterval(", "function ", "let ")
+STATEMENT_START_RE = re.compile(r"(?m)^[ \t]*(world\.|system\.afterEvents\.|system\.runInterval\(|function |event\.)")
+# A `let` inside a block is legal and sometimes right, so it is not a block starter.
+BLOCK_STARTERS = ("world.afterEvents.", "system.afterEvents.", "system.runInterval(", "function ")
 
 
 def depth_at(code, offset):
@@ -674,6 +676,8 @@ def js_structure_problem(code):
         if depth <= 0:
             if head.startswith("world.") and ".subscribe(" not in statement_text(code, start):
                 return start, "world.* calls only work inside an event handler or a timer, not at the top of the file"
+            if head.startswith("event."):
+                return start, "event only exists inside the block that receives it; this line is outside every block"
         elif any(head.startswith(b) for b in BLOCK_STARTERS):
             return start, "this block is inside another block; move it below the last });"
     return None

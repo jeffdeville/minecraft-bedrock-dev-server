@@ -156,7 +156,8 @@ Rules:
 - Words: say "save" only when autosave is off (it is on); never point at
   "the course page" or "the dashboard" (the editor has neither); the deploy
   state is "the status bar" and the errors are "the Deploy panel".
-- The rejoin paragraph, verbatim in every payoff step: "Wait for the status
+- The rejoin paragraph, verbatim in every payoff step (except the tour,
+  whose payoff is the first join): "Wait for the status
   bar to say **live**. Your phone shows *Disconnected from server*: tap your
   server in the list to join again, and tap **Download** if it asks about a
   resource pack."
