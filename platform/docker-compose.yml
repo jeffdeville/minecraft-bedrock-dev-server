@@ -1,0 +1,54 @@
+# The core stack: Caddy in front, the control plane behind it. Run by
+# systemd (platform/systemd/redstone.service) as
+#   docker compose --env-file /opt/redstone/.env -f this-file up -d
+# Learner stacks are separate compose projects from learner.compose.yml,
+# started by the control plane, all on the external "redstone" network.
+name: redstone
+
+services:
+  caddy:
+    image: caddy:2
+    container_name: redstone-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      SITE: ${SITE}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${ROOT}/caddy/learners:/etc/caddy/learners:ro
+      - ${ROOT}/caddy/data:/data
+      - ${ROOT}/caddy/config:/config
+    networks:
+      - redstone
+
+  control:
+    build: ./control
+    image: redstone/control
+    container_name: redstone-control
+    restart: unless-stopped
+    environment:
+      ROOT: ${ROOT}
+      SITE: ${SITE}
+      SECRET: ${SECRET}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      BEDROCK_IMAGE_TAG: ${BEDROCK_IMAGE_TAG:-2026.8.2}
+      BDS_VERSION: ${BDS_VERSION:-LATEST}
+      BDS_MEMORY: ${BDS_MEMORY:-1g}
+      FIRST_PORT: ${FIRST_PORT:-19132}
+      SETTLE: ${SETTLE:-2}
+    volumes:
+      # The only container with the socket: it provisions learner stacks,
+      # sends console commands for the in-game check, and reads their logs.
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Mounted at the same path as on the host so the compose files it runs
+      # and the bind mounts they declare mean the same thing to the daemon.
+      - ${ROOT}:${ROOT}
+    networks:
+      - redstone
+
+networks:
+  redstone:
+    external: true

@@ -1,0 +1,11 @@
+# Build context for platform/code-server/Dockerfile is the repository root
+# (it bundles extension/). Keep the context small.
+.git
+data/
+state/
+backups/
+addons/
+extension/node_modules/
+extension/dist/
+extension/*.vsix
+**/__pycache__/

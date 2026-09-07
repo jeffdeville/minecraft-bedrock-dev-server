@@ -1,0 +1,116 @@
+{
+  "name": "redstone-course",
+  "displayName": "Redstone Course",
+  "description": "The guided Bedrock add-on course beside your code: the current step, live checks, hints, answers, and deploy status.",
+  "version": "0.1.0",
+  "publisher": "clny",
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "vscode": "^1.106.0"
+  },
+  "categories": [
+    "Education"
+  ],
+  "activationEvents": [
+    "workspaceContains:lessons/*.md"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "secondarySideBar": [
+        {
+          "id": "redstone",
+          "title": "Course",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "redstone": [
+        {
+          "type": "webview",
+          "id": "redstone.lesson",
+          "name": "Lesson"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "redstone.check",
+        "title": "Course: Check my work"
+      },
+      {
+        "command": "redstone.hint",
+        "title": "Course: Show the hint"
+      },
+      {
+        "command": "redstone.answer",
+        "title": "Course: Show the answer"
+      },
+      {
+        "command": "redstone.applyAnswer",
+        "title": "Course: Write the answer into my files"
+      },
+      {
+        "command": "redstone.next",
+        "title": "Course: Next lesson"
+      },
+      {
+        "command": "redstone.gameCheck",
+        "title": "Course: Check in the game"
+      },
+      {
+        "command": "redstone.openLesson",
+        "title": "Course: Open the lesson text"
+      },
+      {
+        "command": "redstone.showDeploy",
+        "title": "Course: Show the last deploy"
+      },
+      {
+        "command": "redstone.showLogs",
+        "title": "Course: Show the server and deploy logs"
+      },
+      {
+        "command": "redstone.allowlist",
+        "title": "Course: Who can join my server"
+      }
+    ],
+    "configuration": {
+      "title": "Redstone Course",
+      "properties": {
+        "redstone.checker": {
+          "type": "string",
+          "default": "lesson",
+          "description": "The course checker command (course/bin/lesson). A bare name is looked up on PATH."
+        },
+        "redstone.control": {
+          "type": "string",
+          "default": "",
+          "description": "The course control plane URL for the server log and in-game checks. Empty: use the COURSE_CONTROL environment variable."
+        },
+        "redstone.token": {
+          "type": "string",
+          "default": "",
+          "description": "This learner's token for the control plane. Empty: use the COURSE_TOKEN environment variable."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --format=cjs --platform=node --target=node18 --sourcemap",
+    "watch": "npm run build -- --watch",
+    "typecheck": "tsc --noEmit",
+    "package": "npm run typecheck && npm run build -- --minify && vsce package --no-dependencies --out redstone-course.vsix"
+  },
+  "devDependencies": {
+    "@types/markdown-it": "^14.1.2",
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.106.0",
+    "@vscode/vsce": "^3.2.0",
+    "esbuild": "^0.24.0",
+    "markdown-it": "^14.1.0",
+    "typescript": "^5.6.0"
+  }
+}

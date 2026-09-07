@@ -1,0 +1,31 @@
+{
+  "chat.disableAIFeatures": true,
+  "telemetry.telemetryLevel": "off",
+  "extensions.autoUpdate": false,
+  "extensions.autoCheckUpdates": false,
+  "update.mode": "none",
+  "security.workspace.trust.enabled": false,
+  "workbench.startupEditor": "none",
+  "workbench.tips.enabled": false,
+  "workbench.editorAssociations": {
+    "lessons/**/*.md": "vscode.markdown.preview.editor"
+  },
+  "files.autoSave": "afterDelay",
+  "files.autoSaveDelay": 1000,
+  "files.exclude": {
+    ".course": true,
+    ".git": true,
+    "lessons": true
+  },
+  "editor.quickSuggestions": {
+    "other": "off",
+    "comments": "off",
+    "strings": "off"
+  },
+  "editor.minimap.enabled": false,
+  "editor.fontSize": 15,
+  "git.enabled": false,
+  "terminal.integrated.defaultProfile.linux": "bash",
+  "terminal.integrated.fontSize": 15,
+  "redstone.checker": "/course/bin/lesson"
+}

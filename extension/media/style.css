@@ -1,0 +1,58 @@
+body {
+  font-family: var(--vscode-font-family);
+  font-size: calc(var(--vscode-font-size) + 1px);
+  color: var(--vscode-foreground);
+  padding: 0 12px 24px;
+  line-height: 1.5;
+}
+h1 { font-size: 1.3em; margin: 0 0 4px; }
+h2 { font-size: 1.1em; margin: 16px 0 6px; }
+h3 { font-size: 1em; margin: 10px 0 4px; }
+.crumbs, .muted { color: var(--vscode-descriptionForeground); font-size: 0.9em; }
+.concept { margin: 0 0 10px; color: var(--vscode-descriptionForeground); }
+.md p { margin: 6px 0; }
+.md code { font-family: var(--vscode-editor-font-family); background: var(--vscode-textCodeBlock-background); padding: 1px 4px; border-radius: 3px; }
+.md pre { background: var(--vscode-textCodeBlock-background); padding: 8px; border-radius: 4px; overflow-x: auto; font-size: 0.92em; }
+.md pre code { background: none; padding: 0; }
+details.idea { border: 1px solid var(--vscode-panel-border); border-radius: 6px; padding: 4px 10px; margin: 8px 0; }
+details.idea summary { cursor: pointer; font-weight: 600; }
+ol.steps { list-style: none; padding: 0; margin: 10px 0; }
+ol.steps li { padding: 2px 0; color: var(--vscode-descriptionForeground); }
+ol.steps li.current { color: var(--vscode-foreground); font-weight: 600; }
+ol.steps li.done { text-decoration: line-through; opacity: 0.8; }
+ol.steps .mark { display: inline-block; width: 1.2em; }
+section.step { border-left: 3px solid var(--vscode-focusBorder); padding-left: 10px; }
+section.result { border-radius: 6px; padding: 8px 12px; margin: 10px 0; }
+section.result.fail { background: var(--vscode-inputValidation-errorBackground); border: 1px solid var(--vscode-inputValidation-errorBorder); }
+section.result.waiting { background: var(--vscode-inputValidation-infoBackground); border: 1px solid var(--vscode-inputValidation-infoBorder); }
+section.result h3 { margin-top: 0; }
+.msg { margin: 4px 0; }
+.got { margin: 2px 0 6px; font-family: var(--vscode-editor-font-family); font-size: 0.9em; opacity: 0.9; }
+section.hint { background: var(--vscode-textBlockQuote-background); border-left: 3px solid var(--vscode-textBlockQuote-border); padding: 4px 12px; margin: 10px 0; }
+section.answer pre { background: var(--vscode-textCodeBlock-background); padding: 8px; overflow-x: auto; font-size: 0.85em; max-height: 40vh; }
+section.done { background: var(--vscode-textBlockQuote-background); padding: 8px 12px; border-radius: 6px; }
+.controls { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0; }
+.files { display: flex; flex-wrap: wrap; gap: 6px; }
+.btn {
+  font: inherit; cursor: pointer; border-radius: 4px; padding: 5px 12px;
+  color: var(--vscode-button-secondaryForeground); background: var(--vscode-button-secondaryBackground); border: 1px solid transparent;
+}
+.btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
+.btn.primary { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
+.btn.primary:hover { background: var(--vscode-button-hoverBackground); }
+.btn.danger { border-color: var(--vscode-inputValidation-errorBorder); }
+.btn.small { font-size: 0.85em; padding: 2px 8px; }
+.btn.link { background: none; color: var(--vscode-textLink-foreground); padding: 0 4px; }
+.notice { background: var(--vscode-editorInfo-background, var(--vscode-textBlockQuote-background)); padding: 6px 10px; border-radius: 4px; margin: 8px 0; }
+footer { margin-top: 20px; font-size: 0.9em; }
+
+details.picker summary { cursor: pointer; list-style: none; }
+details.picker summary::-webkit-details-marker { display: none; }
+details.picker .link { color: var(--vscode-textLink-foreground); }
+ol.lessons { list-style: none; padding: 0; margin: 6px 0 10px; border: 1px solid var(--vscode-panel-border); border-radius: 6px; }
+ol.lessons li { padding: 0; }
+ol.lessons li .btn.link { display: block; width: 100%; text-align: left; padding: 3px 8px; color: var(--vscode-foreground); border-radius: 0; }
+ol.lessons li .btn.link:hover { background: var(--vscode-list-hoverBackground); }
+ol.lessons li.current .btn.link { font-weight: 600; background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+ol.lessons li.done .btn.link { opacity: 0.85; }
+footer p { margin: 4px 0; }

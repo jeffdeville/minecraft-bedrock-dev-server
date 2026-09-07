@@ -1,0 +1,15 @@
+[Unit]
+Description=redstone course platform (docker compose)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/redstone/app/platform
+ExecStart=/usr/bin/docker compose --env-file /opt/redstone/.env -f /opt/redstone/app/platform/docker-compose.yml up -d
+ExecStop=/usr/bin/docker compose --env-file /opt/redstone/.env -f /opt/redstone/app/platform/docker-compose.yml down
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,20 @@
+{
+  "format_version": "1.17",
+  "minecraft:npc_dialogue": {
+    "scenes": [
+      {
+        "scene_tag": "kid_quest",
+        "npc_name": "Quest Giver",
+        "text": "Break 10 blocks for me.",
+        "buttons": [
+          {
+            "name": "I will do it",
+            "commands": [
+              "/scriptevent kid:quest start"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

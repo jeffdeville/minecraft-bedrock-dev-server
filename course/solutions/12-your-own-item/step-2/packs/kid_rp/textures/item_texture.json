@@ -1,0 +1,12 @@
+{
+  "resource_pack_name": "kid_rp",
+  "texture_name": "atlas.items",
+  "texture_data": {
+    "kid:wand": {
+      "textures": "textures/items/wand"
+    },
+    "kid:gem": {
+      "textures": "textures/items/gem"
+    }
+  }
+}

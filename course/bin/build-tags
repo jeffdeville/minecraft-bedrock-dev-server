@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""build-tags WORKSPACE [--no-verify]
+
+Replay the course solutions into git tags and fetch them into WORKSPACE:
+
+    lesson/<id>/step-N            the state before step N
+    lesson/<id>/step-N-solution   the state after step N
+
+Solutions are overlays in course/solutions/<id>/step-N/ (see FORMAT.md). A
+step without an overlay changes nothing. After every step the lesson's own
+checks are run against the result, so a solution that fails its own checks
+stops the build: this is also the content test. Tags for steps that no longer
+exist are removed from WORKSPACE and its lessons/ copy is refreshed, so
+running this again after editing a lesson brings an existing workspace up to
+date.
+"""
+
+import sys
+from pathlib import Path
+
+from courselib import build_tags, die
+
+
+def main(argv):
+    flags = [a for a in argv if a.startswith("-")]
+    positional = [a for a in argv if not a.startswith("-")]
+    if len(positional) != 1 or set(flags) - {"--no-verify"}:
+        die(__doc__.strip())
+    ws = Path(positional[0]).resolve()
+    if not (ws / ".git").is_dir():
+        die(f"{ws} is not a git repository")
+    built = build_tags(ws, verify="--no-verify" not in flags)
+    print(f"built {built} step tag pairs into {ws}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

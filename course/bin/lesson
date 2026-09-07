@@ -1,0 +1,1390 @@
+#!/usr/bin/env python3
+"""lesson -- the course checker. Python 3.9+, standard library only.
+
+Runs inside a learner workspace (see course/FORMAT.md):
+
+  lesson                    where you are
+  lesson check [ID]         run the checks, stop at the first failing step
+  lesson hint               the hint for the step you are on
+  lesson answer [--apply]   what is different from the answer; --apply writes it
+  lesson next               move to the next lesson once this one passes
+  lesson goto ID            jump to a lesson
+  lesson list               every lesson and its status
+  lesson watch              re-check on every save; keys h hint, a answer, n next, q quit
+  lesson uuid               print a fresh UUID
+  lesson json               everything the editor extension shows, as JSON
+                            (--no-attempt: do not count a failed step; --no-game:
+                            report game checks as waiting instead of running them)
+
+ID is a lesson id (01-manifest), its number (1), or a prefix (01-).
+
+Authoring options: `check ID --upto N` checks steps 1..N only; `--quiet`
+prints nothing and only sets the exit code.
+"""
+
+import difflib
+import json
+import os
+import re
+import select
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+from pathlib import Path
+
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+PLACEHOLDER_RE = re.compile(r"paste|here|xxx|your", re.I)
+STEP_RE = re.compile(r"^## Step (\d+):[ \t]*(.*)$", re.M)
+CHECK_RE = re.compile(r"<!--\s*check\s*\n(.*?)-->", re.S)
+HINT_RE = re.compile(r"<details>\s*<summary>\s*Hint\s*</summary>(.*?)</details>", re.S | re.I)
+GRADER_LINE_RE = re.compile(r"^\[course\] (PASS|FAIL) (\S+)(?::\s*(.*))?$")
+JSON_STRING_RE = re.compile(r'"(?:\\.|[^"\\])*"')
+PNG_SIG = b"\x89PNG\r\n\x1a\n"
+GAME_TIMEOUT = 40
+DEFAULT_MSG = "this step is not done yet"
+
+
+class Fail(Exception):
+    """A check failed: msg for the learner, got (what was found), code for the event log."""
+
+    def __init__(self, msg, got=None, code=None):
+        super().__init__(msg, got)
+        self.msg, self.got, self.code = msg, got, code
+
+
+class Skip(Exception):
+    """A check cannot run here; arg is the reason."""
+
+
+class BadLesson(Exception):
+    """A lesson file does not follow FORMAT.md; arg is the message for the author."""
+
+
+def die(msg, code=2):
+    print(f"lesson: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+# --- workspace and lessons ----------------------------------------------------
+
+def find_workspace():
+    env = os.environ.get("COURSE_WORKSPACE")
+    if env:
+        return Path(env).resolve()
+    here = Path.cwd().resolve()
+    for d in [here, *here.parents]:
+        if (d / "lessons").is_dir() and (d / "packs").is_dir():
+            return d
+    die("not inside a course workspace (no lessons/ and packs/ directories above here)")
+
+
+def parse_frontmatter(text, name):
+    """A deliberately tiny YAML subset: `key: value`, lists as `[a, b]`, true/false.
+
+    A BOM, CRLF line endings and trailing spaces on the `---` lines are tolerated;
+    anything else that is not a frontmatter block is an error, never a silent {}.
+    """
+    text = text.lstrip("\ufeff").replace("\r\n", "\n")
+    lines = text.split("\n")
+    if lines[0].strip() != "---":
+        raise BadLesson(f"{name}: the file must start with a --- frontmatter block")
+    end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+    if end is None:
+        raise BadLesson(f"{name}: the frontmatter has no closing ---")
+    meta = {}
+    for line in lines[1:end]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if ":" not in line:
+            raise BadLesson(f"{name}: frontmatter line without a colon: {line!r}")
+        key, _, value = line.partition(":")
+        value = value.strip()
+        if value.startswith("[") and value.endswith("]"):
+            value = [v.strip().strip("'\"") for v in value[1:-1].split(",") if v.strip()]
+        elif value in ("true", "false"):
+            value = value == "true"
+        else:
+            value = value.strip("'\"")
+        meta[key.strip()] = value
+    return meta, "\n".join(lines[end + 1:])
+
+
+# Kinds in the order run_check tries them: a json check may carry "exists": true
+# as a condition, so "exists" is only the kind when nothing more specific is present.
+KINDS = ("json", "regex", "same", "differs", "js", "deploy", "game", "exists")
+ALLOWED_KEYS = {
+    "json": {"json", "path", "exists", "absent", "equals", "not", "matches", "oneOf", "uuid", "differsFrom", "loose"},
+    "regex": {"regex", "pattern", "count", "loose"},
+    "same": {"same", "loose"},
+    "differs": {"differs", "loose"},
+    "js": {"js"},
+    "deploy": {"deploy", "behavior_packs", "resource_packs", "scripts_ok"},
+    "game": {"game"},
+    "exists": {"exists", "png"},
+}
+
+
+def check_kind(c):
+    return next((k for k in KINDS if k in c), None) if isinstance(c, dict) else None
+
+
+def relative_path(value):
+    return isinstance(value, str) and value and not Path(value).is_absolute() and ".." not in Path(value).parts
+
+
+def validate_check(c, where):
+    """Refuse a malformed check when the lesson loads, so build-tags catches it
+    before a learner does. Returns the check."""
+    kind = check_kind(c)
+    if kind is None:
+        raise BadLesson(f"{where}: a check needs one of {', '.join(KINDS)}")
+    unknown = sorted(set(c) - ALLOWED_KEYS[kind] - {"msg", "name"})
+    if unknown:
+        raise BadLesson(f"{where}: unknown key(s) for a {kind} check: {', '.join(unknown)}")
+    if not isinstance(c.get("msg"), str) or not c["msg"].strip():
+        raise BadLesson(f"{where}: every check needs a msg written for the learner")
+
+    def need_str(key):
+        if not isinstance(c.get(key), str) or not c[key]:
+            raise BadLesson(f"{where}: {key} must be a non-empty string")
+
+    def need_file(key):
+        if not relative_path(c.get(key)):
+            raise BadLesson(f"{where}: {key} must be a relative path inside the workspace")
+
+    def need_regex(pattern):
+        if not isinstance(pattern, str):
+            raise BadLesson(f"{where}: a regex must be a string")
+        try:
+            re.compile(pattern)
+        except re.error as e:
+            raise BadLesson(f"{where}: {pattern!r} is not a valid regex ({e})")
+
+    if kind == "json":
+        need_file("json")
+        need_str("path")
+        if "matches" in c:
+            need_regex(c["matches"])
+        if "differsFrom" in c:
+            need_str("differsFrom")
+        if "oneOf" in c and not isinstance(c["oneOf"], list):
+            raise BadLesson(f"{where}: oneOf must be a list")
+    elif kind == "regex":
+        need_file("regex")
+        need_regex(c.get("pattern"))
+        if "count" in c and not isinstance(c["count"], int):
+            raise BadLesson(f"{where}: count must be a whole number")
+    elif kind in ("same", "differs"):
+        specs = c[kind]
+        if not isinstance(specs, list) or len(specs) != 2 or not all(isinstance(s, dict) for s in specs):
+            raise BadLesson(f"{where}: {kind} needs a list of exactly two specs")
+        for s in specs:
+            if not relative_path(s.get("file")):
+                raise BadLesson(f"{where}: each {kind} spec needs a file inside the workspace")
+            how = [k for k in ("path", "key", "pattern") if k in s]
+            if len(how) != 1:
+                raise BadLesson(f"{where}: each {kind} spec needs exactly one of path, key, pattern")
+            if "pattern" in s:
+                need_regex(s["pattern"])
+    elif kind in ("js", "exists"):
+        need_file(kind)
+    elif kind == "deploy":
+        need_str("deploy")
+        for key in ("behavior_packs", "resource_packs"):
+            packs = c.get(key, [])
+            if not isinstance(packs, list) or not all(isinstance(p, str) for p in packs):
+                raise BadLesson(f"{where}: {key} must be a list of pack directory names")
+    elif kind == "game":
+        need_str("game")
+    return c
+
+
+class Step:
+    def __init__(self, n, title, body, name):
+        self.n = n
+        self.title = title
+        blocks = CHECK_RE.findall(body)
+        if not blocks:
+            raise BadLesson(f"{name}: step {n} has no <!-- check --> block")
+        if len(blocks) > 1:
+            raise BadLesson(f"{name}: step {n} has {len(blocks)} check blocks; put every check in one block")
+        self.checks = []
+        for line in blocks[0].splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                c = json.loads(line)
+            except json.JSONDecodeError as e:
+                raise BadLesson(f"{name}: step {n} has a malformed check line: {e}\n  {line}")
+            if not isinstance(c, dict):
+                raise BadLesson(f"{name}: step {n} check must be a JSON object:\n  {line}")
+            self.checks.append(validate_check(c, f"{name}: step {n} check {line}"))
+        if not self.checks:
+            raise BadLesson(f"{name}: step {n} has an empty check block")
+        h = HINT_RE.search(body)
+        self.hint = re.sub(r"\n{3,}", "\n\n", h.group(1)).strip() if h else ""
+        self.body = HINT_RE.sub("", CHECK_RE.sub("", body)).strip()
+
+
+class Lesson:
+    def __init__(self, path):
+        self.path = path
+        name = path.name
+        meta, body = parse_frontmatter(path.read_text(encoding="utf-8"), name)
+        self.id = meta.get("id")
+        if self.id != path.stem:
+            raise BadLesson(f"{name}: frontmatter id {self.id!r} must equal the filename ({path.stem})")
+        self.title = meta.get("title") or self.id
+        self.concept = meta.get("concept", "")
+        files = meta.get("files") or []
+        if isinstance(files, str):
+            files = [files]
+        for f in files:
+            if not relative_path(f):
+                raise BadLesson(f"{name}: files entry {f!r} must be a relative path inside the workspace")
+        self.files = files
+        self.steps = []
+        matches = list(STEP_RE.finditer(body))
+        if not matches:
+            raise BadLesson(f"{name}: no '## Step N:' headings")
+        # Everything before the first step, minus the H1: the "Idea" section.
+        self.intro = re.sub(r"(?m)^# .*\n", "", body[:matches[0].start()], count=1).strip()
+        for i, m in enumerate(matches):
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
+            self.steps.append(Step(int(m.group(1)), m.group(2).strip(), body[m.end():end], name))
+        for want, step in enumerate(self.steps, 1):
+            if step.n != want:
+                raise BadLesson(f"{name}: expected '## Step {want}:' but found 'Step {step.n}'")
+        uses_game = any(check_kind(c) == "game" for step in self.steps for c in step.checks)
+        self.game = bool(meta.get("game", False))
+        if self.game != uses_game:
+            raise BadLesson(f"{name}: frontmatter says game: {str(self.game).lower()} but the steps "
+                            f"{'do' if uses_game else 'do not'} use a game check")
+
+
+def load_lessons(ws):
+    lessons = []
+    for p in sorted((ws / "lessons").glob("*.md")):
+        try:
+            lessons.append(Lesson(p))
+        except BadLesson as e:
+            die(f"{e}\n  (if you did not mean to edit lessons/, `git checkout -- lessons` restores it)")
+    if not lessons:
+        die("no lessons in lessons/")
+    return lessons
+
+
+def lesson_by_id(lessons, lid):
+    for lesson in lessons:
+        prefix = lesson.id.split("-")[0]
+        if lesson.id == lid or lesson.id.startswith(lid + "-"):
+            return lesson
+        if lid.isdigit() and prefix.isdigit() and int(prefix) == int(lid):
+            return lesson
+    die(f"no lesson {lid!r}; `lesson list` shows them")
+
+
+# --- progress ----------------------------------------------------------------
+
+def progress_path(ws):
+    return ws / ".course" / "progress.json"
+
+
+def load_progress(ws, lessons):
+    """progress.json is shared with the dashboard, so any shape it may have been
+    left in is repaired here rather than crashing every command."""
+    p = progress_path(ws)
+    data = {"current": lessons[0].id, "lessons": {}}
+    if p.exists():
+        try:
+            saved = json.loads(p.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+            saved = None
+        if isinstance(saved, dict):
+            data.update(saved)
+    if not any(l.id == data.get("current") for l in lessons):
+        data["current"] = lessons[0].id
+    if not isinstance(data.get("lessons"), dict):
+        data["lessons"] = {}
+    for lid, entry in list(data["lessons"].items()):
+        if not isinstance(entry, dict):
+            entry = data["lessons"][lid] = {}
+        fails = entry.get("fails")
+        entry["fails"] = {k: v for k, v in fails.items() if isinstance(v, int)} if isinstance(fails, dict) else {}
+        if not isinstance(entry.get("high"), int):
+            entry["high"] = 0
+    return data
+
+
+def save_progress(ws, data):
+    p = progress_path(ws)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, p)
+
+
+def now():
+    return time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+def log_event(ws, **fields):
+    """Append one line to .course/events.jsonl. Codes and labels only; never
+    anything the learner typed (FORMAT.md, events.jsonl)."""
+    try:
+        p = ws / ".course" / "events.jsonl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **fields}) + "\n")
+    except OSError:
+        pass
+
+
+BROKEN_CODES = {"json.parse", "fence", "js.syntax", "text.bom", "text.binary"}
+
+
+def check_event(ws, lesson, entry, failing, results, source):
+    """The one event a check run produces."""
+    if failing is None:
+        log_event(ws, lesson=lesson.id, step=len(lesson.steps), event="check", outcome="pass", source=source)
+        return
+    last = next((r for r in reversed(results) if r["step"] == failing.n and r["status"] == "fail"), None)
+    log_event(ws, lesson=lesson.id, step=failing.n, event="check", outcome="fail",
+              code=last["code"] if last else "unknown", check=last["label"] if last else "",
+              attempt=entry.get("fails", {}).get(str(failing.n), 0), source=source)
+
+
+# --- value extraction ----------------------------------------------------------
+
+def read_text(ws, rel):
+    path = ws / rel
+    if not path.is_file():
+        raise Fail(f"the file {rel} does not exist", None, "exists.missing")
+    raw = path.read_bytes()
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raise Fail(f"{rel} starts with an invisible BOM character; re-save it as plain UTF-8", None, "text.bom")
+    try:
+        text = raw.decode("utf-8").replace("\r\n", "\n")
+    except UnicodeDecodeError:
+        raise Fail(f"{rel} is not a UTF-8 text file", None, "text.binary")
+    first = next((l for l in text.splitlines() if l.strip()), "")
+    if first.lstrip().startswith("```"):
+        raise Fail(f"the first line of {rel} is ``` : that line is part of the lesson page, not the file; "
+                   "delete it and the ``` at the end", None, "fence")
+    return text
+
+
+def blank_strings(text):
+    """Replace the inside of every JSON string literal with spaces, keeping positions."""
+    return JSON_STRING_RE.sub(lambda m: '"' + " " * (len(m.group(0)) - 2) + '"', text)
+
+
+def load_json(ws, rel):
+    text = read_text(ws, rel)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        if re.search(r"//|/\*", blank_strings(text)):
+            raise Fail(f"{rel} has // or /* comments in it; JSON files cannot have comments", None, "json.parse")
+        raise Fail(f"{rel} is not valid JSON: {explain_json_error(text, e)}", None, "json.parse")
+
+
+def explain_json_error(text, e):
+    """Turn Python's JSON error into a sentence a beginner can act on."""
+    where = f"line {e.lineno}"
+    stripped = text.strip()
+    if not stripped:
+        return "the file is empty"
+    if stripped[0] not in "{[":
+        return "the file should start with an opening {"
+    bare = re.search(r'"[^"\n]*":\s*([0-9a-fA-F]{8}-[0-9a-fA-F-]{27})(?!")', text)
+    if bare and text.count("\n", 0, bare.start()) + 1 >= e.lineno - 1:
+        return f"the uuid on line {text.count(chr(10), 0, bare.start()) + 1} lost its quotes; it needs \" before and after it"
+    if "Unterminated string" in e.msg or "Invalid control character" in e.msg:
+        return f"a closing quote is missing at {where}; the text runs on past the end of the line"
+    if e.pos >= len(text.rstrip()):
+        return "the file ends before it is finished; a closing } or ] is missing, or the paste was cut off"
+    plain = blank_strings(text)
+    opens = plain.count("{") + plain.count("[")
+    closes = plain.count("}") + plain.count("]")
+    if opens > closes:
+        return f"a closing }} or ] is missing (the file opens {opens} blocks and closes {closes})"
+    if opens < closes:
+        return f"there is an extra closing }} or ] at {where}"
+    before = text[:e.pos]
+    following = text[e.pos:e.pos + 1]
+    if re.search(r",\s*$", before) and following and following in "}]":
+        return f"there is an extra comma after the last item, just before {where}"
+    if "Expecting property name" in e.msg:
+        return f"a name is missing its double quotes at {where}"
+    if "Expecting ',' delimiter" in e.msg:
+        return f"a comma is missing at the end of the line before {where}"
+    if "Expecting ':' delimiter" in e.msg:
+        return f"a colon is missing after a name at {where}"
+    if "Expecting value" in e.msg:
+        return f"something is missing or has no quotes around it at {where}"
+    if "Extra data" in e.msg:
+        return f"there is extra text after the closing }} at {where}; the file should end with one }}"
+    return f"{e.msg} at {where}"
+
+
+def get_path(data, path):
+    """Return (found, value) for a dotted path with [N] indexes."""
+    cur = data
+    for part in re.findall(r"[^.\[\]]+|\[\d+\]", path):
+        if part.startswith("["):
+            idx = int(part[1:-1])
+            if not isinstance(cur, list) or idx >= len(cur):
+                return False, None
+            cur = cur[idx]
+        else:
+            if not isinstance(cur, dict) or part not in cur:
+                return False, None
+            cur = cur[part]
+    return True, cur
+
+
+def lang_value(text, key):
+    for line in text.splitlines():
+        line = line.split("#", 1)[0].strip() if not line.startswith(key) else line.strip()
+        if "=" in line:
+            k, _, v = line.partition("=")
+            if k.strip() == key:
+                return True, v.strip()
+    return False, None
+
+
+def rx_flags(loose):
+    """FORMAT.md: matching is exact by default; "loose": true ignores case."""
+    return re.M | re.I if loose else re.M
+
+
+def extract(ws, spec, loose=False):
+    rel = spec.get("file")
+    if not rel:
+        raise Fail("check is missing a file", None)
+    if "path" in spec:
+        return get_path(load_json(ws, rel), spec["path"])
+    text = read_text(ws, rel)
+    if "key" in spec:
+        return lang_value(text, spec["key"])
+    if "pattern" in spec:
+        m = re.search(spec["pattern"], text, rx_flags(loose))
+        if not m:
+            return False, None
+        return True, (m.group(1) if m.groups() else m.group(0))
+    raise Fail("check needs one of path, key, pattern", None)
+
+
+def norm(value, loose):
+    if isinstance(value, str) and loose:
+        return value.strip().lower()
+    return value
+
+
+def show(value):
+    if value is None:
+        return "nothing"
+    return json.dumps(value, ensure_ascii=False)
+
+
+# --- the checks ----------------------------------------------------------------
+
+def check_exists(ws, c):
+    rel = c["exists"]
+    path = ws / rel
+    parent = path.parent
+    # On a case-insensitive disk (a Mac) is_file() says yes to Manifest.json; the
+    # server's disk will not, so insist on the exact name here too.
+    exact_name = parent.is_dir() and path.name in os.listdir(parent)
+    if not path.is_file() or not exact_name:
+        found = misplaced(ws, path)
+        if found:
+            raise Fail(c["msg"], f"found {found} instead; it must be at {rel}, spelled exactly like that", "exists.misplaced")
+        raise Fail(c["msg"], None, "exists.missing")
+    if c.get("png"):
+        with open(path, "rb") as f:
+            if f.read(8) != PNG_SIG:
+                raise Fail(c["msg"], f"{rel} is not a PNG image", "exists.png")
+
+
+def misplaced(ws, path):
+    """Where a file the learner meant to create actually went: the same name in
+    another folder, another case, or with an extra extension (manifest.json.txt)."""
+    want = path.name.lower()
+    stem = path.stem.lower()
+    for root in (ws / "packs", ws):
+        if not root.is_dir():
+            continue
+        for p in sorted(root.rglob("*")):
+            if not p.is_file() or ".git" in p.parts or ".course" in p.parts:
+                continue
+            name = p.name.lower()
+            if p == path:
+                continue
+            # the same name elsewhere or in another case; an extra extension
+            # (manifest.json.txt); the editor's paste name (dirt copy.png)
+            if name == want or name.startswith(want + ".") or name == f"{stem} copy{path.suffix.lower()}":
+                return str(p.relative_to(ws))
+    return None
+
+
+def check_json(ws, c):
+    check_json_value(c, load_json(ws, c["json"]))
+
+
+def check_json_value(c, data):
+    rel, path = c["json"], c["path"]
+    found, value = get_path(data, path)
+    loose = c.get("loose", False)
+    if c.get("absent"):
+        if found:
+            raise Fail(c["msg"], f"{path} is there, and it should not be: it is {show(value)}", "json.absent")
+        return
+    if not found:
+        raise Fail(c["msg"], f"{path} is missing from {rel}", "json.missing")
+    if "equals" in c and norm(value, loose) != norm(c["equals"], loose):
+        got = f"{path} is {show(value)}, want {show(c['equals'])}"
+        if isinstance(value, str) and isinstance(c["equals"], str) and value.strip().lower() == c["equals"].strip().lower():
+            got += " (spelled exactly like that: capital letters and spaces matter here)"
+        raise Fail(c["msg"], got, "json.equals")
+    if "not" in c and norm(value, loose) == norm(c["not"], loose):
+        raise Fail(c["msg"], f"{path} is still {show(value)}", "json.not")
+    if "oneOf" in c and norm(value, loose) not in [norm(v, loose) for v in c["oneOf"]]:
+        raise Fail(c["msg"], f"{path} is {show(value)}, want one of {', '.join(show(v) for v in c['oneOf'])}", "json.oneOf")
+    if "matches" in c:
+        if not isinstance(value, str) or not re.search(c["matches"], value, rx_flags(loose)):
+            raise Fail(c["msg"], f"{path} is {show(value)}", "json.matches")
+    if c.get("uuid"):
+        if not isinstance(value, str) or not UUID_RE.match(value):
+            got = f"{path} is {show(value)}"
+            if isinstance(value, str) and PLACEHOLDER_RE.search(value):
+                got += " (that is the placeholder text)"
+            elif isinstance(value, str) and re.search(r"[{}\s]", value):
+                got += " (no spaces, quotes or braces belong inside it)"
+            raise Fail(c["msg"], got, "json.uuid")
+    if "differsFrom" in c:
+        ok2, other = get_path(data, c["differsFrom"])
+        if ok2 and norm(other, loose) == norm(value, loose):
+            raise Fail(c["msg"], f"{path} and {c['differsFrom']} are both {show(value)}", "json.differsFrom")
+
+
+def check_regex(ws, c):
+    text = read_text(ws, c["regex"])
+    loose = c.get("loose", False)
+    hits = re.findall(c["pattern"], text, rx_flags(loose))
+    if "count" in c:
+        if len(hits) != c["count"]:
+            raise Fail(c["msg"], f"found it {len(hits)} time(s) in {c['regex']}, want {c['count']}", "regex.count")
+    elif not hits:
+        got = f"not found in {c['regex']}"
+        if not loose and re.search(c["pattern"], text, re.M | re.I):
+            got += " (it is there with different capital letters; the game needs it spelled exactly)"
+        raise Fail(c["msg"], got, "regex.missing")
+
+
+def same_value(a, b):
+    """Scalars compare as trimmed text, lists and objects as JSON; a string on one
+    side may be the JSON text of the other."""
+    def as_text(v):
+        return v.strip() if isinstance(v, str) else json.dumps(v, sort_keys=True)
+
+    if isinstance(a, str) != isinstance(b, str):
+        text, other = (a, b) if isinstance(a, str) else (b, a)
+        try:
+            if json.loads(text) == other:
+                return True
+        except ValueError:
+            pass
+    return as_text(a) == as_text(b)
+
+
+def two_values(ws, c, kind):
+    a, b = c[kind]
+    loose = c.get("loose", False)
+    fa, va = extract(ws, a, loose)
+    fb, vb = extract(ws, b, loose)
+    where_a = a.get("path") or a.get("key") or "the pattern"
+    where_b = b.get("path") or b.get("key") or "the pattern"
+    if not fa:
+        raise Fail(c["msg"], f"{where_a} is missing from {a['file']}", f"{kind}.missing")
+    if not fb:
+        raise Fail(c["msg"], f"{where_b} is missing from {b['file']}", f"{kind}.missing")
+    return a, b, norm(va, loose), norm(vb, loose)
+
+
+def check_same(ws, c):
+    a, b, va, vb = two_values(ws, c, "same")
+    if not same_value(va, vb):
+        raise Fail(c["msg"], f"{a['file']} says {show(va)} but {b['file']} says {show(vb)}", "same.differ")
+
+
+def check_differs(ws, c):
+    a, b, va, vb = two_values(ws, c, "differs")
+    if same_value(va, vb):
+        raise Fail(c["msg"], f"{a['file']} and {b['file']} both say {show(va)}", "differs.same")
+
+
+JS_NOISE_RE = re.compile(
+    r"//[^\n]*|/\*.*?\*/|\"(?:\\.|[^\"\\\n])*\"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`", re.S)
+JS_RULES = [
+    (r"console\.log\s*\(", "console.log never reaches the server log; use console.warn"),
+    (r"\bbeforeEvents\b", "beforeEvents cannot change the world; this course uses afterEvents"),
+    (r"\bworldInitialize\b", "worldInitialize was renamed; the event is world.afterEvents.worldLoad"),
+]
+TOP_LEVEL_WORLD_RE = re.compile(r"(?<![\w$.])world\.(?![\w.]*\.subscribe\s*\()")
+
+
+def js_code_only(text):
+    """Blank out comments and string literals, keeping every newline so line numbers hold."""
+    return JS_NOISE_RE.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), text)
+
+
+STATEMENT_START_RE = re.compile(r"(?m)^[ \t]*(world\.|system\.afterEvents\.|system\.runInterval\(|function |event\.)")
+# A `let` inside a block is legal and sometimes right, so it is not a block starter.
+BLOCK_STARTERS = ("world.afterEvents.", "system.afterEvents.", "system.runInterval(", "function ")
+
+
+def depth_at(code, offset):
+    return sum(code.count(ch, 0, offset) for ch in "{[(") - sum(code.count(ch, 0, offset) for ch in "}])")
+
+
+def statement_text(code, start):
+    """The statement from `start` up to the `{` that opens a callback or the `;` that ends it."""
+    end = len(code)
+    for ch in "{;":
+        i = code.find(ch, start)
+        if i != -1:
+            end = min(end, i + 1)
+    return code[start:end]
+
+
+def js_structure_problem(code):
+    """(offset, message) for the two placement mistakes the lessons predict, or None:
+    a `world.` call at the top of the file that is not a .subscribe( (it runs before
+    there is a world), and a block that belongs at the top level pasted inside
+    another block (it multiplies on every event). Statement-level, so the split
+    `world.afterEvents.x` / `.subscribe(` form passes."""
+    for m in STATEMENT_START_RE.finditer(code):
+        start = m.start(1)
+        depth = depth_at(code, start)
+        head = code[start:start + 40]
+        if depth <= 0:
+            if head.startswith("world.") and ".subscribe(" not in statement_text(code, start):
+                return start, "world.* calls only work inside an event handler or a timer, not at the top of the file"
+            if head.startswith("event."):
+                return start, "event only exists inside the block that receives it; this line is outside every block"
+        elif any(head.startswith(b) for b in BLOCK_STARTERS):
+            return start, "this block is inside another block; move it below the last });"
+    return None
+
+
+def line_of(text, offset):
+    return text.count("\n", 0, offset) + 1
+
+
+def check_js(ws, c):
+    rel = c["js"]
+    text = read_text(ws, rel)
+    node = shutil.which("node")
+    if node:
+        # A .mjs copy is parsed as a module by every Node version; a plain .js with
+        # `import` only is on Node 20.19+ / 22.7+.
+        with tempfile.TemporaryDirectory() as tmp:
+            probe = Path(tmp) / "check.mjs"
+            probe.write_text(text, encoding="utf-8")
+            r = subprocess.run([node, "--check", str(probe)], capture_output=True, text=True)
+        if r.returncode != 0:
+            err = [l for l in r.stderr.splitlines() if l.strip() and not l.startswith("Node.js")]
+            loc = next((l for l in err if str(probe) in l), "")
+            msg = next((l for l in err if "Error" in l), err[-1] if err else "syntax error")
+            got = msg.strip()
+            m = re.search(r":(\d+)$", loc.strip())
+            if m:
+                got += f" (line {m.group(1)})"
+            raise Fail(c["msg"], got)
+    code = js_code_only(text)
+    for pattern, why in JS_RULES:
+        m = re.search(pattern, code)
+        if m:
+            raise Fail(c["msg"], f"{why} (line {line_of(code, m.start())} of {rel})")
+    problem = js_structure_problem(code)
+    if problem is not None:
+        at, why = problem
+        code_name = "js.nested" if "inside another" in why else "js.top_level"
+        raise Fail(c["msg"], f"{why} (line {line_of(code, at)} of {rel})", code_name)
+
+
+def check_deploy(ws, c):
+    p = ws / ".course" / "deploy.json"
+    if not p.exists():
+        raise Skip("no deploy yet; this check runs on the course server")
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        d = None
+    if not isinstance(d, dict):
+        raise Fail(c["msg"], "the deploy status file is empty or half-written; wait a moment and check again", "deploy.pending")
+    if d.get("status") != c["deploy"]:
+        got = f"the last deploy {d.get('status') or 'is unknown'}"
+        if d.get("detail"):
+            got += f": {d['detail']}"
+        raise Fail(c["msg"], got, "deploy.failed")
+    if d.get("status") == "ok" and d.get("detail"):
+        raise Fail(c["msg"], f"the server is still coming back ({d['detail']}); wait for the status bar to say live", "deploy.pending")
+    for kind in ("behavior_packs", "resource_packs"):
+        installed = d.get(kind) if isinstance(d.get(kind), list) else []
+        for name in c.get(kind, []):
+            if name not in installed:
+                raise Fail(c["msg"], f"{name} was not installed by the last deploy "
+                                     f"(it installed: {', '.join(map(str, installed)) or 'nothing'})", "deploy.packs")
+    if c.get("scripts_ok"):
+        errors = d.get("script_errors") if isinstance(d.get("script_errors"), list) else []
+        if errors:
+            raise Fail(c["msg"], "the server refused your script: " + str(errors[0])[:300], "deploy.scripts")
+
+
+NO_GAME = False  # set by `lesson json --no-game`: the extension runs game checks from a button
+
+
+def check_game(ws, c):
+    hook = ws / ".course" / "game-check"
+    if not hook.is_file() or not os.access(hook, os.X_OK):
+        raise Skip("no game here; this check runs on the course server")
+    if NO_GAME:
+        raise Fail(c["msg"], "waiting: press 'Check in the game' in the Course panel once your server is up", "game.waiting")
+    try:
+        r = subprocess.run([str(hook), c["game"]], capture_output=True, text=True, timeout=GAME_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise Fail(c["msg"], "the game did not answer in time; is the server running?", "game.fail")
+    if r.returncode == 0:
+        return
+    lines = [l.strip() for l in (r.stdout + "\n" + r.stderr).splitlines() if l.strip()]
+    verdict = next((m for m in map(GRADER_LINE_RE.match, reversed(lines)) if m), None)
+    if verdict and verdict.group(1) == "FAIL":
+        reason = verdict.group(3)
+    else:
+        reason = lines[-1] if lines else ""
+    raise Fail(c["msg"], reason or "the game said no", "game.fail")
+
+
+CHECKS = {
+    "json": check_json,
+    "regex": check_regex,
+    "same": check_same,
+    "differs": check_differs,
+    "js": check_js,
+    "deploy": check_deploy,
+    "game": check_game,
+    "exists": check_exists,
+}
+
+
+def label(c):
+    if "name" in c:
+        return str(c["name"])
+    kind = check_kind(c)
+    if kind == "json":
+        return f"{c.get('json')}: {c.get('path')}"
+    if kind in ("same", "differs"):
+        files = [s.get("file", "?") if isinstance(s, dict) else "?" for s in (c.get(kind) or [])[:2]]
+        return " and ".join(files) + (" agree" if kind == "same" else " differ")
+    if kind == "regex":
+        return f"{c.get('regex')} contains {c.get('pattern')}"
+    if kind == "deploy":
+        return f"the deploy is {c.get('deploy')}"
+    if kind == "game":
+        return f"in the game: {c.get('game')}"
+    return str(c.get(kind, "?"))
+
+
+def run_check(ws, c):
+    """Return ('ok', None), ('skip', reason) or ('fail', (msg, got, code))."""
+    kind = check_kind(c)
+    if kind is None:
+        return "fail", (f"unknown check {json.dumps(c)}", None, "check.broken")
+    c = {"msg": DEFAULT_MSG, **c}
+    try:
+        CHECKS[kind](ws, c)
+        return "ok", None
+    except Skip as e:
+        return "skip", str(e)
+    except Fail as e:
+        return "fail", (e.msg, e.got, e.code or guess_code(kind, e.got))
+    except Exception as e:  # a broken check must never take the learner's terminal down
+        return "fail", (f"the check itself is broken ({e!r}); tell whoever wrote this lesson", None, "check.broken")
+
+
+def guess_code(kind, got):
+    """A code for a Fail raised without one (the js rules), from what it said."""
+    text = got or ""
+    if kind == "js":
+        if "SyntaxError" in text or "syntax" in text.lower():
+            return "js.syntax"
+        if "console.log" in text:
+            return "js.console_log"
+        if "top of the file" in text:
+            return "js.top_level"
+        return "js.rule"
+    return f"{kind}.fail"
+
+
+def run_lesson(ws, lesson, upto=None, out=None, results=None):
+    """Run steps in order, stop at the first failing step.
+
+    Returns (passed_steps, failing_step_or_None, skipped_count).
+    `out` is a list to append TAP lines to, or None for silence; `results`
+    is a list to append one dict per check run to, for `lesson json`.
+    """
+    n = 0
+    passed = 0
+    failing = None
+    skipped = 0
+    for step in lesson.steps:
+        if upto is not None and step.n > upto:
+            break
+        step_ok = True
+        for c in step.checks:
+            n += 1
+            status, info = run_check(ws, c)
+            if status == "ok":
+                if out is not None:
+                    out.append(f"ok {n} - {label(c)}")
+                if results is not None:
+                    results.append({"step": step.n, "label": label(c), "status": "ok"})
+            elif status == "skip":
+                skipped += 1
+                if out is not None:
+                    out.append(f"ok {n} - {label(c)} # SKIP {info}")
+                if results is not None:
+                    results.append({"step": step.n, "label": label(c), "status": "skip", "reason": info})
+            else:
+                step_ok = False
+                msg, got, code = info
+                if out is not None:
+                    out.append(f"not ok {n} - {label(c)}")
+                    out.append(f"  # {msg}")
+                    if got:
+                        out.append(f"  # got: {got}")
+                if results is not None:
+                    results.append({"step": step.n, "label": label(c), "status": "fail", "msg": msg, "got": got or "", "code": code})
+                break  # one thing at a time: the rest of this step waits
+        if step_ok:
+            passed += 1
+        else:
+            failing = step
+            break
+    if out is not None:
+        out.append(f"1..{n}")
+    return passed, failing, skipped
+
+
+# --- commands ------------------------------------------------------------------
+
+def current_lesson(ws, lessons, prog):
+    return lesson_by_id(lessons, prog["current"])
+
+
+def record(ws, prog, lesson, passed, failing, attempt=True):
+    """Write what a run found. `attempt` counts a failed step towards its hint;
+    status, hint and answer look without counting."""
+    entry = prog["lessons"].setdefault(lesson.id, {})
+    entry["steps"] = len(lesson.steps)
+    entry["passed_steps"] = passed
+    entry["high"] = max(entry.get("high", 0), passed)
+    entry["done"] = failing is None
+    entry["at"] = now()
+    fails = entry.setdefault("fails", {})
+    for step in lesson.steps:
+        if step.n <= passed:
+            fails.pop(str(step.n), None)
+    if attempt and failing is not None:
+        fails[str(failing.n)] = fails.get(str(failing.n), 0) + 1
+    save_progress(ws, prog)
+    return entry
+
+
+def cmd_check(ws, lessons, prog, args, attempt=True):
+    args = list(args)
+    quiet = "--quiet" in args
+    upto = None
+    if "--upto" in args:
+        i = args.index("--upto")
+        value = args[i + 1] if i + 1 < len(args) else ""
+        if not value.isdigit() or int(value) < 1:
+            die("usage: lesson check [ID] [--upto N] [--quiet]   (N is a step number, 1 or more)")
+        upto = int(value)
+        del args[i:i + 2]
+    positional = [a for a in args if not a.startswith("--")]
+    lesson = lesson_by_id(lessons, positional[0]) if positional else current_lesson(ws, lessons, prog)
+    out = None if quiet else []
+    results = []
+    passed, failing, skipped = run_lesson(ws, lesson, upto=upto, out=out, results=results)
+    entry = record(ws, prog, lesson, passed, failing, attempt=attempt) if upto is None else None
+    if entry is not None:
+        check_event(ws, lesson, entry, failing, results, "cli" if attempt else "watch")
+    if quiet:
+        return 0 if failing is None else 1
+    print(f"# {lesson.id}: {lesson.title}")
+    print("\n".join(out))
+    print()
+    if failing is None:
+        if upto is not None:
+            print(f"Steps 1 to {upto} pass.")
+        else:
+            print(f"Lesson done: {lesson.title}.", end=" ")
+            if skipped:
+                print(f"({skipped} check(s) skipped because the course server is not here.)", end=" ")
+            print("Type `lesson next` to move on.")
+        return 0
+    print(f"Step {failing.n}: {failing.title} -- not yet.")
+    server_step = all(check_kind(c) in ("deploy", "game") for c in failing.checks)
+    if entry is not None and failing.n <= entry["high"] and not server_step:
+        # A file that stops parsing fails step 1 even for a learner on step 5; the
+        # step-1 hint ("paste the starter text again") would cost them their work.
+        print(f"Step {failing.n} passed before, so something in the file stopped working. "
+              "`lesson answer` shows the fix.")
+    elif entry is not None and entry["fails"].get(str(failing.n), 0) >= 2 and failing.hint:
+        print()
+        print("Hint:")
+        print(indent(failing.hint))
+    else:
+        print("Stuck? Type `lesson hint`.")
+    return 1
+
+
+def indent(text, pad="  "):
+    return "\n".join(pad + l for l in text.splitlines())
+
+
+def where(ws, lessons, prog):
+    """(lesson, step_or_None) -- the step the learner is on for the current lesson.
+    Records what it saw (without counting an attempt) so `high` stays current."""
+    lesson = current_lesson(ws, lessons, prog)
+    passed, failing, _ = run_lesson(ws, lesson)
+    record(ws, prog, lesson, passed, failing, attempt=False)
+    return lesson, failing
+
+
+def cmd_status(ws, lessons, prog, args):
+    lesson, failing = where(ws, lessons, prog)
+    i = lessons.index(lesson) + 1
+    print(f"Lesson {i} of {len(lessons)}: {lesson.title}")
+    print(f"  {lesson.concept}")
+    if failing is None:
+        print(f"  All {len(lesson.steps)} steps pass. Type `lesson next`.")
+    else:
+        print(f"  You are on step {failing.n} of {len(lesson.steps)}: {failing.title}")
+        print(f"  Open lessons/{lesson.path.name}, then `lesson check` when you have made the change.")
+    return 0
+
+
+def cmd_hint(ws, lessons, prog, args):
+    lesson, failing = where(ws, lessons, prog)
+    if failing is None:
+        print("Nothing to hint at: every step of this lesson passes.")
+        return 0
+    log_event(ws, lesson=lesson.id, step=failing.n, event="hint", source="cli")
+    print(f"Step {failing.n}: {failing.title}")
+    print()
+    print(indent(failing.hint or "There is no hint for this step. Try `lesson answer`."))
+    return 0
+
+
+def git(ws, *args):
+    return subprocess.run(["git", "-C", str(ws), *args], capture_output=True)
+
+
+def tag_exists(ws, tag):
+    return git(ws, "rev-parse", "-q", "--verify", f"refs/tags/{tag}").returncode == 0
+
+
+def show_at(ws, tag, rel):
+    """The bytes of rel in the tag, or None when the tag has no such file."""
+    r = git(ws, "show", f"{tag}:{rel}")
+    return r.stdout if r.returncode == 0 else None
+
+
+def set_path(data, path, value):
+    parts = re.findall(r"[^.\[\]]+|\[\d+\]", path)
+    cur = data
+    for part in parts[:-1]:
+        cur = cur[int(part[1:-1])] if part.startswith("[") else cur[part]
+    last = parts[-1]
+    if last.startswith("["):
+        cur[int(last[1:-1])] = value
+    else:
+        cur[last] = value
+
+
+def learner_string(theirs, theirs_text, answer_text, path, answer_value):
+    """The learner's string at `path`, even when their file no longer parses: the
+    k-th `"key": "..."` in the answer is matched with the k-th in their text."""
+    if theirs is not None:
+        found, value = get_path(theirs, path)
+        return value if found and isinstance(value, str) else None
+    key = re.findall(r"[^.\[\]]+", path)[-1]
+    pair = re.compile(r'"%s"\s*:\s*("(?:\\.|[^"\\])*")' % re.escape(key))
+    in_answer = [m.group(1) for m in pair.finditer(answer_text)]
+    in_theirs = [m.group(1) for m in pair.finditer(theirs_text)]
+    wanted = json.dumps(answer_value, ensure_ascii=False)
+    if in_answer.count(wanted) != 1 or len(in_theirs) != len(in_answer):
+        return None
+    try:
+        return json.loads(in_theirs[in_answer.index(wanted)])
+    except ValueError:
+        return None
+
+
+def keep_learner_values(lesson, rel, mine, want):
+    """Solutions carry one fixed name and fixed UUIDs, but the lesson accepts any
+    name and any fresh UUID. Where the learner's own value passes every check on
+    its path, keep it in the answer, so the diff (and --apply) only touch what is
+    wrong. Works on a file that no longer parses too, which is when --apply is used."""
+    try:
+        theirs_text = mine.decode("utf-8")
+        text = want.decode("utf-8")
+        json.loads(text)
+    except (ValueError, UnicodeDecodeError):
+        return want
+    try:
+        theirs = json.loads(theirs_text)
+    except ValueError:
+        theirs = None
+    checks = [c for step in lesson.steps for c in step.checks
+              if check_kind(c) == "json" and c["json"] == rel]
+    for path in dict.fromkeys(c["path"] for c in checks):
+        answer = json.loads(text)
+        ok, answer_value = get_path(answer, path)
+        if not ok or not isinstance(answer_value, str):
+            continue
+        value = learner_string(theirs, theirs_text, text, path, answer_value)
+        if not isinstance(value, str) or value == answer_value:
+            continue
+        set_path(answer, path, value)
+        try:
+            for c in checks:
+                if c["path"] == path:
+                    check_json_value({"msg": DEFAULT_MSG, **c}, answer)
+        except Fail:
+            continue
+        old = json.dumps(answer_value, ensure_ascii=False)
+        if text.count(old) == 1:
+            text = text.replace(old, json.dumps(value, ensure_ascii=False))
+    return text.encode("utf-8")
+
+
+def print_diff(rel, mine, want):
+    try:
+        a = mine.decode("utf-8").splitlines(keepends=True) if mine is not None else []
+        b = want.decode("utf-8").splitlines(keepends=True)
+    except UnicodeDecodeError:
+        print(f"--- yours:  {rel}\n+++ answer: {rel}\nBinary files differ.")
+        return
+    color = sys.stdout.isatty()
+    for line in difflib.unified_diff(a, b, fromfile=f"yours:  {rel}", tofile=f"answer: {rel}"):
+        line = line.rstrip("\n")
+        if color and line.startswith("+") and not line.startswith("+++"):
+            line = f"\033[32m{line}\033[0m"
+        elif color and line.startswith("-") and not line.startswith("---"):
+            line = f"\033[31m{line}\033[0m"
+        print(line)
+
+
+def step_files(step):
+    """The files a step's checks name, in order, without repeats."""
+    files = []
+    for c in step.checks:
+        kind = check_kind(c)
+        names = []
+        if kind in ("json", "regex", "js", "exists"):
+            names = [c[kind]]
+        elif kind in ("same", "differs"):
+            names = [s.get("file") for s in c[kind] if isinstance(s, dict)]
+        for f in names:
+            if isinstance(f, str) and f and f not in files:
+                files.append(f)
+    return files
+
+
+def cmd_answer(ws, lessons, prog, args):
+    lesson, failing = where(ws, lessons, prog)
+    if failing is None:
+        print("Every step of this lesson passes; there is nothing to show.")
+        return 0
+    if all(check_kind(c) in ("deploy", "game") for c in failing.checks):
+        print(f"Step {failing.n} is checked by the course server, not by a file you can edit. "
+              "`lesson check` shows what the server said.")
+        return 0
+    # A broken file fails step 1 even when the learner had reached step 4, so the
+    # answer shown is for the furthest step they had reached, never earlier.
+    high = prog["lessons"].get(lesson.id, {}).get("high", 0)
+    n = min(max(failing.n, high + 1), len(lesson.steps))
+    if n != failing.n:
+        print(f"Showing the answer for step {n}, the furthest step you had reached.")
+        print()
+    tag = f"lesson/{lesson.id}/step-{n}-solution"
+    if not shutil.which("git") or not tag_exists(ws, tag):
+        print(f"No answer is available for step {n} yet.")
+        return 1
+    apply = "--apply" in args
+    log_event(ws, lesson=lesson.id, step=n, event="apply" if apply else "answer", source="cli")
+    changed = 0
+    for rel in step_files(lesson.steps[n - 1]) or lesson.files:
+        want = show_at(ws, tag, rel)
+        if want is None:
+            continue  # the solution has not created this file by this step; leave it alone
+        have = ws / rel
+        mine = have.read_bytes() if have.is_file() else None
+        if mine is not None:
+            want = keep_learner_values(lesson, rel, mine, want)
+        if mine == want:
+            continue
+        changed += 1
+        if apply:
+            have.parent.mkdir(parents=True, exist_ok=True)
+            have.write_bytes(want)
+        else:
+            print_diff(rel, mine, want)
+    if apply:
+        print(f"Wrote the answer for step {n} ({changed} file(s) changed). Read it, then `lesson check`.")
+    elif changed == 0:
+        print("Your files match the answer for this step; if the check still fails, run `lesson check` again.")
+    else:
+        print()
+        print("Lines with + are what the answer has that you do not. `lesson answer --apply` writes it for you.")
+    return 0
+
+
+def cmd_next(ws, lessons, prog, args):
+    lesson, failing = where(ws, lessons, prog)
+    if failing is not None:
+        print(f"Not yet: step {failing.n} of {lesson.title} does not pass. `lesson check` says what is missing.")
+        return 1
+    i = lessons.index(lesson)
+    if i + 1 >= len(lessons):
+        print("That was the last lesson. You finished the course.")
+        return 0
+    nxt = lessons[i + 1]
+    prog["current"] = nxt.id
+    save_progress(ws, prog)
+    log_event(ws, lesson=nxt.id, step=1, event="next", source="cli")
+    print(f"Lesson {i + 2}: {nxt.title}")
+    print(f"  Open lessons/{nxt.path.name} to start.")
+    return 0
+
+
+def cmd_goto(ws, lessons, prog, args):
+    if not args:
+        die("usage: lesson goto ID")
+    lesson = lesson_by_id(lessons, args[0])
+    prog["current"] = lesson.id
+    save_progress(ws, prog)
+    return cmd_status(ws, lessons, prog, [])
+
+
+def cmd_list(ws, lessons, prog, args):
+    for i, lesson in enumerate(lessons, 1):
+        entry = prog["lessons"].get(lesson.id, {})
+        if entry.get("done"):
+            mark = "done"
+        elif entry.get("passed_steps"):
+            mark = f"step {entry['passed_steps'] + 1}/{len(lesson.steps)}"
+        else:
+            mark = ""
+        here = "->" if lesson.id == prog["current"] else "  "
+        print(f"{here} {i:2d}. {lesson.title:<45} {mark}")
+    return 0
+
+
+def stat_all(paths):
+    sig = []
+    for p in paths:
+        try:
+            st = p.stat()
+            sig.append((str(p), st.st_mtime_ns, st.st_size))
+        except OSError:
+            sig.append((str(p), None, None))
+    return tuple(sig)
+
+
+def watched(ws, lesson):
+    """(files_signature, other_signature) for the watch loop.
+
+    The lesson's files and every directory above them are in the first part, so a
+    save, a new file or a misnamed one all trigger a re-check; the lesson text and
+    deploy.json are in the second, which re-checks without counting an attempt.
+    """
+    paths = []
+    for f in lesson.files:
+        parts = Path(f).parts
+        paths.extend(ws.joinpath(*parts[:i]) for i in range(1, len(parts) + 1))
+    return stat_all(paths), stat_all([lesson.path, ws / ".course" / "deploy.json"])
+
+
+def cmd_watch(ws, lessons, prog, args):
+    if not sys.stdin.isatty():
+        die("watch needs a terminal")
+    import termios
+    import tty
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    tty.setcbreak(fd)
+    last = None
+    try:
+        while True:
+            prog = load_progress(ws, lessons)
+            lesson = current_lesson(ws, lessons, prog)
+            sig = watched(ws, lesson)
+            if sig != last:
+                attempt = last is not None and sig[0] != last[0]
+                last = sig
+                print("\033[2J\033[H", end="")
+                cmd_check(ws, lessons, prog, [], attempt=attempt)
+                print()
+                print("watching... h hint, a answer, n next, q quit")
+            ready, _, _ = select.select([fd], [], [], 0.7)
+            if not ready:
+                continue
+            data = os.read(fd, 64)
+            if not data:
+                break
+            if data[:1] == b"\x1b":
+                continue  # arrow keys and friends: ESC sequences, never a command
+            key = chr(data[0]).lower()
+            if key == "q":
+                break
+            if key == "h":
+                print()
+                cmd_hint(ws, lessons, prog, [])
+            elif key == "a":
+                print()
+                cmd_answer(ws, lessons, prog, [])
+            elif key == "n":
+                print()
+                if cmd_next(ws, lessons, prog, []) == 0:
+                    last = None
+            elif key == "r":
+                last = None
+    except KeyboardInterrupt:
+        pass
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    return 0
+
+
+def cmd_json(ws, lessons, prog, args):
+    """One document with everything the editor extension renders."""
+    global NO_GAME
+    NO_GAME = "--no-game" in args
+    attempt = "--no-attempt" not in args
+    source = args[args.index("--source") + 1] if "--source" in args and args.index("--source") + 1 < len(args) else "button"
+    lesson = current_lesson(ws, lessons, prog)
+    results = []
+    passed, failing, _ = run_lesson(ws, lesson, results=results)
+    high = prog["lessons"].get(lesson.id, {}).get("high", 0)
+    # A file that stops parsing fails an early step for a learner who was further
+    # along: keep showing the step they had reached, say what broke, and do not
+    # count the save as an attempt (FORMAT.md, "broken").
+    broken = None
+    last_fail = next((r for r in reversed(results) if r["status"] == "fail"), None)
+    if failing is not None and last_fail and last_fail["code"] in BROKEN_CODES and failing.n <= high:
+        broken = {"file": last_fail["label"].split(":")[0], "message": last_fail["msg"]}
+        attempt = False
+    entry = record(ws, prog, lesson, passed, failing, attempt=attempt)
+    current = failing.n if failing else None
+    if broken:
+        current = min(high + 1, len(lesson.steps))
+        log_event(ws, lesson=lesson.id, step=current, event="broken", code=last_fail["code"], check=last_fail["label"], source=source)
+    else:
+        check_event(ws, lesson, entry, failing, results, source)
+    steps = []
+    for step in lesson.steps:
+        if broken:
+            status = "done" if step.n < current else "current" if step.n == current else "todo"
+        elif step.n <= passed:
+            status = "done"
+        elif failing is not None and step.n == failing.n:
+            status = "current"
+        else:
+            status = "todo"
+        steps.append({
+            "n": step.n,
+            "title": step.title,
+            "body": step.body,
+            "hint": step.hint,
+            "status": status,
+            "game": any(check_kind(c) == "game" for c in step.checks),
+            "checks": [r for r in results if r["step"] == step.n],
+        })
+    deploy = None
+    try:
+        deploy = json.loads((ws / ".course" / "deploy.json").read_text())
+    except (OSError, ValueError):
+        pass
+    hook = ws / ".course" / "game-check"
+    doc = {
+        "workspace": str(ws),
+        "lessons": [{
+            "id": l.id,
+            "title": l.title,
+            "done": bool(prog["lessons"].get(l.id, {}).get("done")),
+            "current": l.id == lesson.id,
+        } for l in lessons],
+        "lesson": {
+            "id": lesson.id,
+            "title": lesson.title,
+            "concept": lesson.concept,
+            "intro": lesson.intro,
+            "file": f"lessons/{lesson.path.name}",
+            "files": lesson.files,
+            "index": lessons.index(lesson) + 1,
+            "count": len(lessons),
+            "steps": steps,
+            "current_step": current,
+            "done": failing is None,
+            "fails": entry.get("fails", {}).get(str(current), 0) if current else 0,
+            "broken": broken,
+        },
+        "deploy": deploy,
+        "game_available": hook.is_file() and os.access(hook, os.X_OK),
+    }
+    print(json.dumps(doc))
+    return 0
+
+
+COMMANDS = {
+    "json": cmd_json,
+    "check": cmd_check,
+    "hint": cmd_hint,
+    "answer": cmd_answer,
+    "next": cmd_next,
+    "goto": cmd_goto,
+    "list": cmd_list,
+    "watch": cmd_watch,
+    "status": cmd_status,
+}
+
+
+def main(argv):
+    if argv[:1] in (["-h"], ["--help"], ["help"]):
+        print(__doc__.strip())
+        return 0
+    if argv[:1] == ["uuid"]:
+        print(uuid.uuid4())
+        return 0
+    ws = find_workspace()
+    lessons = load_lessons(ws)
+    prog = load_progress(ws, lessons)
+    cmd = argv[0] if argv else "status"
+    if cmd not in COMMANDS:
+        die(f"unknown command {cmd!r}; `lesson help` lists them")
+    return COMMANDS[cmd](ws, lessons, prog, argv[1:])
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

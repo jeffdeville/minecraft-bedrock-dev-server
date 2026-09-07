@@ -1,0 +1,22 @@
+{
+  "format_version": 2,
+  "header": {
+    "name": "Course Grader",
+    "description": "Answers `scriptevent course:check <lesson>` with PASS or FAIL in the server log. Installed by the platform, never edited by a learner.",
+    "uuid": "6f1b0c2e-8d1a-4c0f-9c3e-2a7b5d4e9f10",
+    "version": [1, 0, 0],
+    "min_engine_version": [1, 26, 0]
+  },
+  "modules": [
+    {
+      "type": "script",
+      "language": "javascript",
+      "uuid": "b3e9a7c4-5d62-4f8e-a1b0-7c2d9e4f6a21",
+      "version": [1, 0, 0],
+      "entry": "scripts/main.js"
+    }
+  ],
+  "dependencies": [
+    { "module_name": "@minecraft/server", "version": "2.9.0" }
+  ]
+}

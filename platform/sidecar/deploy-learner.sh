@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# One deploy for one learner, the same steps as bin/deploy.sh without rsync
+# or compose:
+#
+#   assemble packs/ + grader -> install-packs.py -> ask the control plane to
+#   restart the server -> write .course/deploy.json -> snapshot
+#
+# Runs inside the sidecar container. Nothing to restart when the packs are
+# the same as the last successful deploy (the sidecar itself restarting must
+# not bounce the server).
+set -uo pipefail
+
+WS=/workspace
+DATA=/data
+STATE=/state
+ADDONS="$STATE/addons"
+LEVEL="${LEVEL_NAME:-world}"
+started=$(date +%s)
+
+SCRIPT_ERRORS='[]'
+write_state() {
+  # write_state STATUS DETAIL   (SCRIPT_ERRORS: a JSON list from the restart endpoint)
+  SCRIPT_ERRORS="$SCRIPT_ERRORS" python3 - "$WS/.course/deploy.json" "$1" "$2" "$STATE/installed-packs.json" "${revision:-}" "$(( $(date +%s) - started ))" <<'PY'
+import json, os, sys, time
+path, status, detail, installed, rev, secs = sys.argv[1:7]
+try:
+    script_errors = json.loads(os.environ.get("SCRIPT_ERRORS") or "[]")
+except ValueError:
+    script_errors = []
+packs = {"behavior_packs": [], "resource_packs": []}
+try:
+    with open(installed) as f:
+        for kind, names in json.load(f).items():
+            packs[kind] = [n for n in names if n != "grader_bp"]
+except (OSError, ValueError):
+    pass
+os.makedirs(os.path.dirname(path), exist_ok=True)
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump({
+        "status": status,
+        "detail": detail,
+        "revision": rev,
+        "duration_seconds": int(secs),
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "at_epoch": int(time.time()),
+        "script_errors": script_errors,
+        **packs,
+    }, f, indent=2)
+os.replace(tmp, path)
+PY
+}
+
+mkdir -p "$ADDONS" "$STATE"
+revision=$( { find "$WS/packs" /grader_bp -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum; } | sha256sum | cut -c1-7)
+last=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("revision",""))' "$WS/.course/deploy.json" 2>/dev/null || true)
+if [ "$last" = "$revision" ]; then
+  # Nothing changed since the last attempt, successful or not: the poll path
+  # lands here every few seconds, and a failed deploy is only worth retrying
+  # once the learner has changed something.
+  exit 0
+fi
+echo "==> deploy $revision for $LEARNER"
+
+# --- 1. assemble: the learner's packs plus the grader ------------------------
+rsync -a --delete --exclude '.*' "$WS/packs/" "$ADDONS/" || { write_state failed "could not copy packs/"; exit 1; }
+rsync -a --delete /grader_bp/ "$ADDONS/grader_bp/" || { write_state failed "could not copy the grader"; exit 1; }
+# The phone caches a server's resource pack by uuid + version, so a resource
+# pack whose content changed must carry a new version or the phone keeps the
+# old pictures and names with no error anywhere. Bump the copy the server
+# gets (never the learner's file) to [1, 0, <hash of this deploy>].
+python3 - "$ADDONS" "$revision" <<'PY'
+import json, os, re, sys
+addons, rev = sys.argv[1], sys.argv[2]
+patch = int(rev[:6], 16) % 60000 if re.fullmatch(r"[0-9a-f]+", rev or "") else 1
+for name in os.listdir(addons):
+    m = os.path.join(addons, name, "manifest.json")
+    if not os.path.isfile(m):
+        continue
+    try:
+        with open(m, encoding="utf-8-sig") as f:
+            d = json.loads(re.sub(r"(?m)^\s*//.*$", "", f.read()))
+    except (OSError, ValueError):
+        continue
+    types = {mod.get("type") for mod in d.get("modules", []) if isinstance(mod, dict)}
+    if not types & {"resources", "client_data"} or not isinstance(d.get("header"), dict):
+        continue
+    v = d["header"].get("version")
+    if isinstance(v, list) and len(v) == 3:
+        d["header"]["version"] = [v[0], v[1], patch]
+        with open(m, "w", encoding="utf-8") as f:
+            json.dump(d, f, indent=2)
+        # Any behavior pack that depends on this resource pack must ask for the new version.
+        for other in os.listdir(addons):
+            om = os.path.join(addons, other, "manifest.json")
+            if other == name or not os.path.isfile(om):
+                continue
+            try:
+                with open(om, encoding="utf-8-sig") as f:
+                    od = json.loads(re.sub(r"(?m)^\s*//.*$", "", f.read()))
+            except (OSError, ValueError):
+                continue
+            changed = False
+            for dep in od.get("dependencies", []):
+                if isinstance(dep, dict) and dep.get("uuid") == d["header"].get("uuid"):
+                    dep["version"] = d["header"]["version"]
+                    changed = True
+            if changed:
+                with open(om, "w", encoding="utf-8") as f:
+                    json.dump(od, f, indent=2)
+PY
+
+# --- 2. install and activate ---------------------------------------------------
+out=$(python3 /app/bin/install-packs.py "$ADDONS" "$DATA" "$STATE" "$LEVEL" 2>&1)
+rc=$?
+printf '%s\n' "$out"
+if [ $rc -ne 0 ]; then
+  detail=$(printf '%s\n' "$out" | grep '!!' | sed 's/^ *!! //; s/ -- deploy stopped$//' | head -1)
+  write_state failed "${detail:-install failed: $(printf '%s' "$out" | tail -1)}"
+  exit 1
+fi
+
+# --- 3. restart the server -------------------------------------------------
+write_state ok "server restarting"
+answer=$(curl -sS -m 200 -X POST -H "Authorization: Bearer ${COURSE_TOKEN:-}" \
+  "${COURSE_CONTROL:-http://redstone-control:8000}/api/restart/$LEARNER" 2>&1)
+rc=$?
+# Two lines: "yes"/"no", then the script_errors list. (Not `started`: that is
+# the deploy's start time, used for the duration.)
+parsed=$(printf '%s' "$answer" | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin); print("yes" if d.get("started") else "no"); print(json.dumps(d.get("script_errors", [])))
+except Exception: print("no"); print("[]")' 2>/dev/null)
+SCRIPT_ERRORS=$(printf '%s\n' "$parsed" | sed -n 2p)
+[ -n "$SCRIPT_ERRORS" ] || SCRIPT_ERRORS='[]'
+echo "==> restart: ${answer:0:200}"
+if [ $rc -eq 0 ] && [ "$(printf '%s\n' "$parsed" | sed -n 1p)" = "yes" ]; then
+  if [ "$SCRIPT_ERRORS" != "[]" ]; then
+    echo "==> the server refused a script:"; printf '%s\n' "$SCRIPT_ERRORS" | python3 -c 'import json,sys; [print("   ", e) for e in json.load(sys.stdin)]'
+  fi
+  write_state ok ""
+else
+  write_state ok "packs installed; the server is taking a while to come back (${answer:0:120})"
+fi
+
+# --- 4. snapshot ----------------------------------------------------------------
+if [ -d "$WS/.git" ]; then
+  git -C "$WS" add -A packs >/dev/null 2>&1 && \
+  git -c user.name=course -c user.email=course@localhost -c commit.gpgsign=false \
+      -C "$WS" commit -q -m "deploy $revision" >/dev/null 2>&1 || true
+fi
+echo "==> done in $(( $(date +%s) - started ))s"
