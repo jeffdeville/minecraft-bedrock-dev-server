@@ -39,6 +39,7 @@ ssh "${SSH_OPTS[@]}" "root@$HOST" 'mkdir -p /opt/redstone/app'
 rsync -az --delete \
   --exclude .git --exclude data/ --exclude state/ --exclude addons/ --exclude backups/ \
   --exclude .env --exclude .envrc --exclude __pycache__ --exclude .serena/ \
+  --exclude node_modules --exclude extension/dist --exclude '*.vsix' \
   -e "ssh ${SSH_OPTS[*]}" ./ "root@$HOST:/opt/redstone/app/"
 
 echo "==> bootstrap"

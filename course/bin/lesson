@@ -12,6 +12,9 @@ Runs inside a learner workspace (see course/FORMAT.md):
   lesson list               every lesson and its status
   lesson watch              re-check on every save; keys h hint, a answer, n next, q quit
   lesson uuid               print a fresh UUID
+  lesson json               everything the editor extension shows, as JSON
+                            (--no-attempt: do not count a failed step; --no-game:
+                            report game checks as waiting instead of running them)
 
 ID is a lesson id (01-manifest), its number (1), or a prefix (01-).
 
@@ -219,6 +222,7 @@ class Step:
             raise BadLesson(f"{name}: step {n} has an empty check block")
         h = HINT_RE.search(body)
         self.hint = re.sub(r"\n{3,}", "\n\n", h.group(1)).strip() if h else ""
+        self.body = HINT_RE.sub("", CHECK_RE.sub("", body)).strip()
 
 
 class Lesson:
@@ -242,6 +246,8 @@ class Lesson:
         matches = list(STEP_RE.finditer(body))
         if not matches:
             raise BadLesson(f"{name}: no '## Step N:' headings")
+        # Everything before the first step, minus the H1: the "Idea" section.
+        self.intro = re.sub(r"(?m)^# .*\n", "", body[:matches[0].start()], count=1).strip()
         for i, m in enumerate(matches):
             end = matches[i + 1].start() if i + 1 < len(matches) else len(body)
             self.steps.append(Step(int(m.group(1)), m.group(2).strip(), body[m.end():end], name))
@@ -627,10 +633,15 @@ def check_deploy(ws, c):
                                      f"(it installed: {', '.join(map(str, installed)) or 'nothing'})")
 
 
+NO_GAME = False  # set by `lesson json --no-game`: the extension runs game checks from a button
+
+
 def check_game(ws, c):
     hook = ws / ".course" / "game-check"
     if not hook.is_file() or not os.access(hook, os.X_OK):
         raise Skip("no game here; this check runs on the course server")
+    if NO_GAME:
+        raise Fail(c["msg"], "waiting: press 'Check in the game' in the Course panel once your server is up")
     try:
         r = subprocess.run([str(hook), c["game"]], capture_output=True, text=True, timeout=GAME_TIMEOUT)
     except subprocess.TimeoutExpired:
@@ -693,11 +704,12 @@ def run_check(ws, c):
         return "fail", (f"the check itself is broken ({e!r}); tell whoever wrote this lesson", None)
 
 
-def run_lesson(ws, lesson, upto=None, out=None):
+def run_lesson(ws, lesson, upto=None, out=None, results=None):
     """Run steps in order, stop at the first failing step.
 
     Returns (passed_steps, failing_step_or_None, skipped_count).
-    `out` is a list to append TAP lines to, or None for silence.
+    `out` is a list to append TAP lines to, or None for silence; `results`
+    is a list to append one dict per check run to, for `lesson json`.
     """
     n = 0
     passed = 0
@@ -713,18 +725,24 @@ def run_lesson(ws, lesson, upto=None, out=None):
             if status == "ok":
                 if out is not None:
                     out.append(f"ok {n} - {label(c)}")
+                if results is not None:
+                    results.append({"step": step.n, "label": label(c), "status": "ok"})
             elif status == "skip":
                 skipped += 1
                 if out is not None:
                     out.append(f"ok {n} - {label(c)} # SKIP {info}")
+                if results is not None:
+                    results.append({"step": step.n, "label": label(c), "status": "skip", "reason": info})
             else:
                 step_ok = False
+                msg, got = info
                 if out is not None:
-                    msg, got = info
                     out.append(f"not ok {n} - {label(c)}")
                     out.append(f"  # {msg}")
                     if got:
                         out.append(f"  # got: {got}")
+                if results is not None:
+                    results.append({"step": step.n, "label": label(c), "status": "fail", "msg": msg, "got": got or ""})
                 break  # one thing at a time: the rest of this step waits
         if step_ok:
             passed += 1
@@ -1108,7 +1126,70 @@ def cmd_watch(ws, lessons, prog, args):
     return 0
 
 
+def cmd_json(ws, lessons, prog, args):
+    """One document with everything the editor extension renders."""
+    global NO_GAME
+    NO_GAME = "--no-game" in args
+    attempt = "--no-attempt" not in args
+    lesson = current_lesson(ws, lessons, prog)
+    results = []
+    passed, failing, _ = run_lesson(ws, lesson, results=results)
+    entry = record(ws, prog, lesson, passed, failing, attempt=attempt)
+    current = failing.n if failing else None
+    steps = []
+    for step in lesson.steps:
+        if step.n <= passed:
+            status = "done"
+        elif failing is not None and step.n == failing.n:
+            status = "current"
+        else:
+            status = "todo"
+        steps.append({
+            "n": step.n,
+            "title": step.title,
+            "body": step.body,
+            "hint": step.hint,
+            "status": status,
+            "game": any(check_kind(c) == "game" for c in step.checks),
+            "checks": [r for r in results if r["step"] == step.n],
+        })
+    deploy = None
+    try:
+        deploy = json.loads((ws / ".course" / "deploy.json").read_text())
+    except (OSError, ValueError):
+        pass
+    hook = ws / ".course" / "game-check"
+    doc = {
+        "workspace": str(ws),
+        "lessons": [{
+            "id": l.id,
+            "title": l.title,
+            "done": bool(prog["lessons"].get(l.id, {}).get("done")),
+            "current": l.id == lesson.id,
+        } for l in lessons],
+        "lesson": {
+            "id": lesson.id,
+            "title": lesson.title,
+            "concept": lesson.concept,
+            "intro": lesson.intro,
+            "file": f"lessons/{lesson.path.name}",
+            "files": lesson.files,
+            "index": lessons.index(lesson) + 1,
+            "count": len(lessons),
+            "steps": steps,
+            "current_step": current,
+            "done": failing is None,
+            "fails": entry.get("fails", {}).get(str(current), 0) if current else 0,
+        },
+        "deploy": deploy,
+        "game_available": hook.is_file() and os.access(hook, os.X_OK),
+    }
+    print(json.dumps(doc))
+    return 0
+
+
 COMMANDS = {
+    "json": cmd_json,
     "check": cmd_check,
     "hint": cmd_hint,
     "answer": cmd_answer,

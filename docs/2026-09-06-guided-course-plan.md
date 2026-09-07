@@ -85,12 +85,22 @@ on BDS 1.26.45.1 with no player connected; `sourceType` is `Server`. It
 requires `CONTENT_LOG_CONSOLE_OUTPUT_ENABLED=true` on the container, or script
 output never reaches the log at all.
 
-**Rendering: VS Code's built-in Markdown preview, checker in the terminal.**
-Lesson files open as previews via `workbench.editorAssociations`; the
-control plane links to `?folder=...&payload=[["openFile", ...]]`. The
-checker runs as a watch loop in the integrated terminal, rustlings-style: save,
-see `ok`/`not ok`, press `h` for the hint. A webview extension with buttons is
-the upgrade if the terminal proves too hidden for the learner. Not first.
+**Rendering: a VS Code extension, decided 2026-09-07.** The first cut was the
+built-in Markdown preview plus the checker as a watch loop in the terminal.
+That is too hidden for a twelve-year-old, so the guidance is a small
+extension (`extension/`): a Course panel in the activity bar showing the
+Idea, the step list, the current step, live check results after every save,
+Hint, Show answer, Write the answer, Next lesson, Check in the game, and the
+deploy state in the status bar. It runs in the extension host, so it works
+the same in code-server and in desktop VS Code, and it holds no lesson
+logic: it renders `lesson json` and turns buttons into checker commands, so
+the format and the checker stay the contract. It is built in a Node stage
+of the editor image and side-loaded as a `.vsix`; the box never needs Node.
+Later, a desktop mode can upload packs to the control plane over HTTPS with
+the learner's token, so a kid on any laptop needs only VS Code and the
+extension; the checker would be ported to TypeScript then, so the client
+needs no Python. vscode.dev is out: browser-only extensions cannot spawn
+processes. The terminal checker stays as the fallback and the authoring tool.
 
 **Course content is generic, not the submarine project.** Lessons build a fresh
 pack in a `kid:` namespace so they are reusable by any learner and do not
@@ -113,6 +123,7 @@ course/                      Thread A. Content and the checker. No server needed
   templates/                 starter workspace: packs/kid_bp, packs/kid_rp, settings
   grader_bp/                 behavior pack that answers scriptevent course:check
   solutions/                 built by `course/bin/build-tags` into git tags of a workspace
+extension/                   The guidance UI: a VS Code extension over `lesson json`.
 platform/                    Thread B. Everything that runs on the box.
   install.sh                 dev machine: rsync to root@host:/opt/redstone/app, run bootstrap
   bootstrap.sh               on the box, idempotent: docker, .env, network, firewall, systemd, compose up

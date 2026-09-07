@@ -17,3 +17,7 @@ addons/
 *.swp
 __pycache__/
 .serena/
+# VS Code extension build products
+extension/node_modules/
+extension/dist/
+extension/*.vsix

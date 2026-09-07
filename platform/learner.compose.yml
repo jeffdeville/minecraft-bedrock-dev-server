@@ -41,7 +41,9 @@ services:
       - redstone
 
   code:
-    build: ${ROOT}/app/platform/code-server
+    build:
+      context: ${ROOT}/app
+      dockerfile: platform/code-server/Dockerfile
     image: redstone/code-server
     container_name: redstone-${LEARNER}-code
     restart: unless-stopped
