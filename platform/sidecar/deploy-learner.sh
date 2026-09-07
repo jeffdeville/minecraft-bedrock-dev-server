@@ -125,14 +125,16 @@ write_state ok "server restarting"
 answer=$(curl -sS -m 200 -X POST -H "Authorization: Bearer ${COURSE_TOKEN:-}" \
   "${COURSE_CONTROL:-http://redstone-control:8000}/api/restart/$LEARNER" 2>&1)
 rc=$?
-started=$(printf '%s' "$answer" | python3 -c 'import json,sys
+# Two lines: "yes"/"no", then the script_errors list. (Not `started`: that is
+# the deploy's start time, used for the duration.)
+parsed=$(printf '%s' "$answer" | python3 -c 'import json,sys
 try:
     d=json.load(sys.stdin); print("yes" if d.get("started") else "no"); print(json.dumps(d.get("script_errors", [])))
 except Exception: print("no"); print("[]")' 2>/dev/null)
-SCRIPT_ERRORS=$(printf '%s\n' "$started" | sed -n 2p)
+SCRIPT_ERRORS=$(printf '%s\n' "$parsed" | sed -n 2p)
 [ -n "$SCRIPT_ERRORS" ] || SCRIPT_ERRORS='[]'
 echo "==> restart: ${answer:0:200}"
-if [ $rc -eq 0 ] && [ "$(printf '%s\n' "$started" | sed -n 1p)" = "yes" ]; then
+if [ $rc -eq 0 ] && [ "$(printf '%s\n' "$parsed" | sed -n 1p)" = "yes" ]; then
   if [ "$SCRIPT_ERRORS" != "[]" ]; then
     echo "==> the server refused a script:"; printf '%s\n' "$SCRIPT_ERRORS" | python3 -c 'import json,sys; [print("   ", e) for e in json.load(sys.stdin)]'
   fi
