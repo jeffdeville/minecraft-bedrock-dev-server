@@ -75,6 +75,7 @@
         </section>`);
       }
 
+      parts.push(`<p class="muted">A red underline in your code is the editor's guess. This panel is the lesson's answer.</p>`);
       const controls = [button("check", "Check again", "")];
       if (current.game && state.gameAvailable) {
         controls.push(button("game", state.gameBusy ? "Asking the game…" : "Check in the game", "primary"));

@@ -6,10 +6,48 @@
   "files.autoSaveDelay": 1000,
   "files.exclude": {
     ".course": true,
-    ".git": true
+    ".git": true,
+    "jsconfig.json": true
   },
-  "editor.quickSuggestions": { "other": "off", "comments": "off", "strings": "off" },
+  "editor.quickSuggestions": {
+    "other": "on",
+    "comments": "off",
+    "strings": "off"
+  },
   "editor.minimap.enabled": false,
   "git.enabled": false,
-  "workbench.startupEditor": "none"
+  "workbench.startupEditor": "none",
+  "json.schemaDownload.enable": false,
+  "json.schemas": [
+    {
+      "fileMatch": [
+        "packs/*/manifest.json"
+      ],
+      "url": "./.course/schemas/manifest.json"
+    },
+    {
+      "fileMatch": [
+        "packs/*/items/*.json"
+      ],
+      "url": "./.course/schemas/items.json"
+    },
+    {
+      "fileMatch": [
+        "packs/*/textures/item_texture.json"
+      ],
+      "url": "./.course/schemas/item_texture.json"
+    },
+    {
+      "fileMatch": [
+        "packs/*/texts/languages.json"
+      ],
+      "url": "./.course/schemas/languages.json"
+    },
+    {
+      "fileMatch": [
+        "packs/*/dialogue/*.json"
+      ],
+      "url": "./.course/schemas/dialogue.json"
+    }
+  ]
 }

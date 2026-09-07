@@ -123,7 +123,7 @@ def refresh_lessons(ws):
 
 # Template entries the course owns outright: refreshed in existing workspaces.
 # Everything else in the template is copied once and then belongs to the learner.
-TEMPLATE_OWNED = {".vscode", "assets"}
+TEMPLATE_OWNED = {".vscode", "assets", ".course", "jsconfig.json"}
 
 
 def refresh_template(ws, vars_):

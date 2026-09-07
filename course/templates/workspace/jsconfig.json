@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "module": "es2022",
+    "target": "es2022",
+    "moduleResolution": "bundler",
+    "checkJs": true,
+    "noEmit": true,
+    "lib": ["es2022"],
+    "types": [],
+    "paths": { "@minecraft/server": ["./.course/types/@minecraft/server/index.d.ts"] }
+  },
+  "include": ["packs/**/*.js", ".course/types/**/*.d.ts"]
+}
