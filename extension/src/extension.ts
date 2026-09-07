@@ -300,13 +300,36 @@ class Course {
   async next(): Promise<void> {
     const r = await runChecker(this.ws, ["next"]);
     this.notice = (r.stdout + r.stderr).trim();
+    if (r.code === 0) {
+      await this.switchedLesson();
+    } else {
+      this.schedule(false, 0);
+    }
+  }
+
+  /** Jump to any lesson: they are independent, and the files stay as they are. */
+  async goto(id: string): Promise<void> {
+    const r = await runChecker(this.ws, ["goto", id]);
+    if (r.code !== 0) {
+      this.notice = (r.stdout + r.stderr).trim();
+      this.render();
+      return;
+    }
+    this.notice = undefined;
+    await this.switchedLesson();
+  }
+
+  /** After a lesson change: fresh panel state, a clean editor area, and the
+   * lesson's first file open so the learner is looking at the right place. */
+  private async switchedLesson(): Promise<void> {
     this.shownHint = false;
     this.answerText = undefined;
-    this.schedule(false, 0);
-    const first = this.doc?.lesson.file;
-    if (r.code === 0 && first) {
-      // The new lesson's file name arrives with the next refresh; open it then.
-      setTimeout(() => void this.openLesson(), 800);
+    this.pendingAttempt = false;
+    await this.refresh(false);
+    await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+    const first = this.doc?.lesson.files.find((f) => fs.existsSync(path.join(this.ws, f)));
+    if (first) {
+      await vscode.window.showTextDocument(vscode.Uri.file(path.join(this.ws, first)), { preview: false });
     }
   }
 
@@ -375,6 +398,7 @@ class Course {
         case "answer": void this.answer(); break;
         case "apply": void this.applyAnswer(); break;
         case "next": void this.next(); break;
+        case "goto": if (m.arg) { void this.goto(m.arg); } break;
         case "game": void this.gameCheck(); break;
         case "openLesson": void this.openLesson(); break;
         case "allowlist": void vscode.commands.executeCommand("redstone.allowlist"); break;

@@ -22,8 +22,16 @@
     const current = L.steps.find((s) => s.status === "current");
     const parts = [];
 
+    const doneCount = state.lessons.filter((l) => l.done).length;
     parts.push(`<header>
-      <div class="crumbs">Lesson ${L.index} of ${L.count}</div>
+      <details class="picker">
+        <summary class="crumbs">Lesson ${L.index} of ${L.count} · ${doneCount} done · <span class="link">all lessons</span></summary>
+        <ol class="lessons">${state.lessons.map((l, i) => {
+          const mark = l.done ? "✓" : l.current ? "→" : "·";
+          return `<li class="${l.current ? "current" : ""} ${l.done ? "done" : ""}">
+            <button class="btn link" data-cmd="goto" data-arg="${esc(l.id)}"><span class="mark">${mark}</span> ${i + 1}. ${esc(l.title)}</button></li>`;
+        }).join("")}</ol>
+      </details>
       <h1>${esc(L.title)}</h1>
       <p class="concept">${esc(L.concept)}</p>
     </header>`);
@@ -76,9 +84,11 @@
       }
 
       parts.push(`<p class="muted">A red underline in your code is the editor's guess. This panel is the lesson's answer.</p>`);
-      const controls = [button("check", "Check again", "")];
+      const controls = [];
       if (current.game && state.gameAvailable) {
         controls.push(button("game", state.gameBusy ? "Asking the game…" : "Check in the game now", "primary"));
+      } else {
+        controls.push(button("check", "Check my work", "primary"));
       }
       if (current.hint && !state.showHint) {
         controls.push(button("hint", "Hint", ""));
@@ -98,9 +108,12 @@
       }
     }
 
+    const idx = state.lessons.findIndex((l) => l.current);
+    const prev = idx > 0 ? state.lessons[idx - 1] : null;
+    const nxt = idx >= 0 && idx < state.lessons.length - 1 ? state.lessons[idx + 1] : null;
     parts.push(`<footer>
-      ${button("openLesson", "Open the lesson text", "link")} · ${button("allowlist", "Who can join my server", "link")}
-      <span class="muted"> · ${state.lessons.filter((l) => l.done).length} of ${state.lessons.length} lessons done</span>
+      <p>${prev ? button("goto", "← " + prev.title, "link", prev.id) : ""} ${nxt ? button("goto", nxt.title + " →", "link", nxt.id) : ""}</p>
+      <p>${button("openLesson", "Open the lesson text", "link")} · ${button("allowlist", "Who can join my server", "link")}</p>
     </footer>`);
 
     app.innerHTML = parts.join("\n");
