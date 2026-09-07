@@ -131,6 +131,17 @@ def docker(*args, timeout=30):
     return subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
 
 
+def console(container, *words):
+    """Send one console line to a Bedrock server via the image's send-command.
+
+    That script finds the server process by scanning /proc, which Ubuntu's
+    docker-default AppArmor profile denies to a normal exec (even as root);
+    a privileged exec is outside the profile. Verified on the box; a plain
+    `docker exec` works on Docker Desktop and fails on Ubuntu.
+    """
+    return docker("exec", "-u", "0", "--privileged", container, "send-command", *words, timeout=15)
+
+
 def container_state(name):
     r = docker("inspect", "-f", "{{.State.Status}}", name, timeout=10)
     return r.stdout.strip() if r.returncode == 0 else "absent"
@@ -142,7 +153,7 @@ def game_check(name, lesson_id):
     if container_state(c) != "running":
         return False, f"[course] FAIL {lesson_id}: your server is not running; press Restart on the course page"
     since = int(time.time()) - 1
-    r = docker("exec", c, "send-command", "scriptevent", "course:check", lesson_id, timeout=15)
+    r = console(c, "scriptevent", "course:check", lesson_id)
     if r.returncode != 0:
         return False, f"[course] FAIL {lesson_id}: could not reach the server console ({r.stderr.strip()[:120]})"
     deadline = time.time() + GAME_WAIT
@@ -160,7 +171,7 @@ def restart_server(name, wait=True):
     """Warn players, restart the learner's server, wait for it to come up."""
     c = f"redstone-{name}-bds"
     if container_state(c) == "running":
-        docker("exec", c, "send-command", "say", "§eYour pack changed. Restarting, back in a few seconds.", timeout=15)
+        console(c, "say", "§eYour pack changed. Restarting, back in a few seconds.")
         time.sleep(2)
     since = int(time.time())
     r = docker("restart", c, timeout=90)
