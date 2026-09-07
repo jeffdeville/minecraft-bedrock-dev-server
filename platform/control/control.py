@@ -508,7 +508,9 @@ class Handler(BaseHTTPRequestHandler):
             if not name:
                 return self.send_text("forbidden", 403)
             threading.Thread(target=restart_server, args=(name, False), daemon=True).start()
-            return self.redirect(f"/?learner={name}&notice=restarting" if admin else "/?notice=restarting")
+            notice = "Restart requested. The server line above says running again in about 20 seconds; reload this page to see it."
+            q = urllib.parse.urlencode({"learner": name, "notice": notice} if admin else {"notice": notice})
+            return self.redirect(f"/?{q}")
         if path == "/allowlist":
             name = self.owned(user, admin, f.get("learner"))
             if not name:
