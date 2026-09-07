@@ -16,9 +16,11 @@ from pathlib import Path
 
 COURSE = Path(__file__).resolve().parent.parent
 # A fixed identity and no signing, so the replay works on any box whatever the
-# user's global git config says.
+# user's global git config says. safe.directory=*: the provisioner runs as
+# root over workspaces owned by the learner's uid, which git otherwise refuses.
 GIT_CONFIG = ["-c", "user.name=course", "-c", "user.email=course@localhost",
-              "-c", "commit.gpgsign=false", "-c", "tag.gpgSign=false"]
+              "-c", "commit.gpgsign=false", "-c", "tag.gpgSign=false",
+              "-c", "safe.directory=*"]
 
 
 def die(msg):
