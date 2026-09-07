@@ -234,14 +234,52 @@ def write_allowlist(name):
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(entries, indent=2) + "\n")
     os.replace(tmp, path)
-    try:
-        os.chown(path, 1000, 1000)
-    except OSError:
-        pass
+    # permissions.json is what the server actually consults; the default
+    # permission level in server.properties did not make a joining player an
+    # operator in practice. Every allowed player with a known xuid is one.
+    perms = data_dir / "permissions.json"
+    ops = [{"permission": "operator", "xuid": e["xuid"]} for e in entries if e.get("xuid")]
+    ptmp = perms.with_suffix(".tmp")
+    ptmp.write_text(json.dumps(ops, indent=3) + "\n")
+    os.replace(ptmp, perms)
+    for f in (path, perms):
+        try:
+            os.chown(f, 1000, 1000)
+        except OSError:
+            pass
     c = f"redstone-{name}-bds"
     if container_state(c) == "running":
         console(c, "allowlist", "reload")
+        console(c, "permission", "reload")
     return tags
+
+
+def reconcile_players():
+    """Every 20 s: an allowed player whose xuid we did not know yet, but whom the
+    server has since seen joining, gets their xuid recorded, so they become an
+    operator and can never be mismatched by spelling again."""
+    while True:
+        try:
+            with db() as conn:
+                pending = conn.execute(
+                    "SELECT learner, gamertag FROM allowed WHERE xuid IS NULL OR xuid = ''").fetchall()
+            by_learner = {}
+            for r in pending:
+                by_learner.setdefault(r["learner"], []).append(r["gamertag"])
+            for learner, tags in by_learner.items():
+                if container_state(f"redstone-{learner}-bds") != "running":
+                    continue
+                seen = {p["gamertag"].lower(): p["xuid"] for p in seen_players(learner)}
+                found = [(seen[t.lower()], learner, t) for t in tags if t.lower() in seen]
+                if found:
+                    with db() as conn:
+                        for xuid, l, t in found:
+                            conn.execute("UPDATE allowed SET xuid = ? WHERE learner = ? AND gamertag = ?", (xuid, l, t))
+                    write_allowlist(learner)
+                    print(f"recorded xuid for {', '.join(t for _, _, t in found)} on {learner}", flush=True)
+        except Exception as e:  # never let the reconciler die
+            print(f"reconcile: {e!r}", flush=True)
+        time.sleep(20)
 
 
 def allowed_for(name):
@@ -779,6 +817,7 @@ LOGIN_FORM = """
 
 def main():
     init_db()
+    threading.Thread(target=reconcile_players, daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", 8000), Handler)
     print(f"redstone control on :8000, root {ROOT}, site {SITE}", flush=True)
     server.serve_forever()
