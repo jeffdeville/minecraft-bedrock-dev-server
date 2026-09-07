@@ -69,6 +69,7 @@ interface Doc {
 }
 
 const md = new MarkdownIt({ html: false, linkify: false });
+const GAME_POLL_MS = 8000;
 
 function findWorkspace(): string | undefined {
   for (const folder of vscode.workspace.workspaceFolders ?? []) {
@@ -142,6 +143,7 @@ class Course {
   private answerText: string | undefined;
   private notice: string | undefined;
   private gameBusy = false;
+  private gameTimer: NodeJS.Timeout | undefined;
 
   constructor(private readonly ctx: vscode.ExtensionContext, readonly ws: string) {
     this.status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
@@ -196,6 +198,7 @@ class Course {
       this.updateStatus();
       this.logDeploy(doc);
       this.render();
+      this.scheduleGamePoll();
     } catch (e) {
       this.notice = `could not read the checker's answer: ${e}`;
       this.render();
@@ -213,6 +216,33 @@ class Course {
     this.lastDeployAt = d.at;
     logEvent(this.ws, { lesson: doc.lesson.id, step: doc.lesson.current_step, event: "deploy",
       outcome: d.status === "ok" ? "pass" : "fail", code: d.status === "ok" ? undefined : "deploy.failed", source: "sidecar" });
+  }
+
+  /**
+   * A step checked inside the game (join, hold the wand, the scoreboard) is
+   * re-checked on its own every few seconds while it is the current step, so
+   * the learner who is looking at the phone sees the tick without pressing
+   * anything. Polls do not count as attempts, so they never trigger the hint.
+   */
+  private scheduleGamePoll(): void {
+    if (this.gameTimer) {
+      clearTimeout(this.gameTimer);
+      this.gameTimer = undefined;
+    }
+    const doc = this.doc;
+    const step = doc?.lesson.steps.find((s) => s.status === "current");
+    if (!doc || doc.lesson.done || !step?.game || !doc.game_available) {
+      return;
+    }
+    this.gameTimer = setTimeout(() => {
+      this.gameTimer = undefined;
+      if (this.busy || this.gameBusy) {
+        this.scheduleGamePoll();
+        return;
+      }
+      this.pendingAttempt = false;
+      void this.refresh(true);
+    }, GAME_POLL_MS);
   }
 
   private updateStatus(): void {

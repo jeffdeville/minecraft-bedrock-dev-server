@@ -70,15 +70,15 @@
         </section>`);
       } else if (waiting) {
         parts.push(`<section class="result waiting">
-          <h3>Ready for the game</h3>
-          <p class="msg">This step is checked inside Minecraft. Wait for the status bar to say <b>live</b>, then press the button.</p>
+          <h3>Checking in your game…</h3>
+          <p class="msg">This step is checked inside Minecraft, every few seconds, by itself. Do the step on your phone and watch this box. The button checks right now.</p>
         </section>`);
       }
 
       parts.push(`<p class="muted">A red underline in your code is the editor's guess. This panel is the lesson's answer.</p>`);
       const controls = [button("check", "Check again", "")];
       if (current.game && state.gameAvailable) {
-        controls.push(button("game", state.gameBusy ? "Asking the game…" : "Check in the game", "primary"));
+        controls.push(button("game", state.gameBusy ? "Asking the game…" : "Check in the game now", "primary"));
       }
       if (current.hint && !state.showHint) {
         controls.push(button("hint", "Hint", ""));

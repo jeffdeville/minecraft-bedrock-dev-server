@@ -81,8 +81,7 @@ On your phone, in Minecraft:
 
 When you appear, chat says **My Pack is on!**. That sentence comes from
 `kid_bp`, the behavior half: a line of code that runs when a player appears.
-
-Then press **Check in the game** in the panel.
+The panel notices you are in the world by itself, within a few seconds.
 
 <details><summary>Hint</summary>
 Chat is the speech bubble at the top of the screen; if you missed it, tap
@@ -115,7 +114,8 @@ Now the two halves, in your hand:
 - It has a **picture** because of `wand.png` in `kid_rp`.
 - It is **called** Wand because of `en_US.lang` in `kid_rp`.
 
-Press **Check in the game**. Then try your prediction:
+The panel ticks this step by itself once you hold the Wand. Then try your
+prediction:
 
 **Try this:** in `kid_rp/texts/en_US.lang`, change `Wand` to any name you
 like. Wait for **live**, join again, `/give @s kid:wand` again. New name,
