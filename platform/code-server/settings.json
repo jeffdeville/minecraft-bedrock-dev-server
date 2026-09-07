@@ -16,10 +16,15 @@
     ".course": true,
     ".git": true
   },
-  "editor.quickSuggestions": { "other": "off", "comments": "off", "strings": "off" },
+  "editor.quickSuggestions": {
+    "other": "off",
+    "comments": "off",
+    "strings": "off"
+  },
   "editor.minimap.enabled": false,
   "editor.fontSize": 15,
   "git.enabled": false,
   "terminal.integrated.defaultProfile.linux": "bash",
-  "terminal.integrated.fontSize": 15
+  "terminal.integrated.fontSize": 15,
+  "redstone.checker": "/course/bin/lesson"
 }

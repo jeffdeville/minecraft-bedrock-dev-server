@@ -13,6 +13,8 @@
   /api/restart/<name>      bearer-token endpoint the deploy sidecar calls after
                            installing packs: warn players, docker restart, wait
                            for "Server started"
+  /api/logs/<name>         bearer-token endpoint the editor extension polls for
+                           the learner's server log (docker logs --timestamps)
 
 Users, sessions and the per-learner token and port live in
 $ROOT/control.db (SQLite). Provisioning is provision.py in a thread; its
@@ -374,6 +376,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.auth_check()
         if path.startswith("/game-check/"):
             return self.api_game_check(path)
+        if path.startswith("/api/logs/"):
+            return self.api_logs(path, query)
         if path == "/login":
             return self.send_html(page("Log in", LOGIN_FORM))
         if path == "/logout":
@@ -468,6 +472,25 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_text("forbidden", 403)
         ok, detail = restart_server(name)
         self.send_text(detail + "\n", 200 if ok else 504)
+
+    def api_logs(self, path, query):
+        """The learner's server log since a timestamp, with docker's own
+        timestamps kept so the caller can dedupe: GET /api/logs/<name>?since=<rfc3339|epoch>."""
+        parts = path.split("/")
+        if len(parts) != 4 or not NAME_RE.match(parts[3]):
+            return self.send_text("usage: /api/logs/<learner>?since=...", 400)
+        name = parts[3]
+        if not self.token_owner(name):
+            return self.send_text("forbidden", 403)
+        since = query.get("since", [""])[0]
+        if not re.match(r"^[0-9TZ:.+-]{0,40}$", since):
+            return self.send_text("bad since", 400)
+        c = f"redstone-{name}-bds"
+        args = ["logs", "--timestamps", "--tail", "400"]
+        if since:
+            args += ["--since", since]
+        r = docker(*args, c, timeout=15)
+        self.send_text(r.stdout + r.stderr if r.returncode == 0 else "", 200)
 
     def api_game_check(self, path):
         parts = path.split("/")

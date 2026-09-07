@@ -6,6 +6,7 @@ import * as fs from "fs";
 import * as path from "path";
 import MarkdownIt from "markdown-it";
 import * as vscode from "vscode";
+import { DeployLog, ServerLog } from "./logs";
 
 interface Check {
   step: number;
@@ -65,17 +66,51 @@ function findWorkspace(): string | undefined {
   return undefined;
 }
 
-function checkerCommand(): string {
-  return vscode.workspace.getConfiguration("redstone").get<string>("checker") || "lesson";
+/**
+ * Where the checker is. The setting wins; a bare name is looked up on PATH
+ * and then in the places the course box and a repo checkout put it. The
+ * extension host's PATH is not the terminal's (code-server gives it a login
+ * shell's PATH), which is why a bare "lesson" alone is not enough.
+ */
+function checkerCommand(ws: string): string {
+  const configured = vscode.workspace.getConfiguration("redstone").get<string>("checker") || "lesson";
+  if (configured.includes("/") || configured.includes("\\")) {
+    return configured;
+  }
+  const dirs = [
+    ...(process.env.PATH ?? "").split(path.delimiter),
+    "/course/bin",
+    path.join(ws, "..", "..", "app", "course", "bin"),
+    path.join(ws, "course", "bin"),
+  ];
+  for (const dir of dirs) {
+    const candidate = path.join(dir, configured);
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch {
+      // keep looking
+    }
+  }
+  return configured;
 }
 
 function runChecker(ws: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+  const cmd = checkerCommand(ws);
   return new Promise((resolve) => {
-    execFile(checkerCommand(), args, { cwd: ws, maxBuffer: 4 * 1024 * 1024, timeout: 120_000 }, (err, stdout, stderr) => {
-      const code = err && typeof (err as NodeJS.ErrnoException).code === "number"
-        ? ((err as NodeJS.ErrnoException).code as unknown as number)
-        : err ? 1 : 0;
-      resolve({ code, stdout: stdout ?? "", stderr: stderr ?? "" });
+    execFile(cmd, args, { cwd: ws, maxBuffer: 4 * 1024 * 1024, timeout: 120_000 }, (err, stdout, stderr) => {
+      let code = 0;
+      let extra = "";
+      if (err) {
+        const e = err as NodeJS.ErrnoException & { code?: number | string; killed?: boolean };
+        code = typeof e.code === "number" ? e.code : 1;
+        if (e.code === "ENOENT") {
+          extra = `the checker was not found (looked for "${cmd}"); set redstone.checker to the path of course/bin/lesson`;
+        } else if (e.killed) {
+          extra = "the checker took too long and was stopped";
+        }
+      }
+      resolve({ code, stdout: stdout ?? "", stderr: (stderr ?? "") + (extra ? "\n" + extra : "") });
     });
   });
 }
@@ -129,7 +164,7 @@ class Course {
       }
       const r = await runChecker(this.ws, args);
       if (r.code !== 0 || !r.stdout.trim()) {
-        this.notice = r.stderr.trim() || `the checker (${checkerCommand()}) did not answer`;
+        this.notice = r.stderr.trim() || `the checker (${checkerCommand(this.ws)}) answered nothing`;
         this.render();
         return;
       }
@@ -370,8 +405,31 @@ export function activate(ctx: vscode.ExtensionContext): void {
   deploy.onDidCreate(() => course.schedule(false));
   ctx.subscriptions.push(packs, deploy);
 
+  // The bottom panel: the sidecar's deploy log and the server's own log.
+  const cfg = vscode.workspace.getConfiguration("redstone");
+  const deployLog = new DeployLog(ws);
+  const serverLog = new ServerLog(
+    cfg.get<string>("control") || process.env.COURSE_CONTROL || "",
+    process.env.COURSE_LEARNER || "",
+    cfg.get<string>("token") || process.env.COURSE_TOKEN || "",
+  );
+  const deployLogWatcher = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(ws, ".course/deploy.log"));
+  deployLogWatcher.onDidChange(() => deployLog.catchUp());
+  deployLogWatcher.onDidCreate(() => deployLog.catchUp());
+  const deployLogPoll = setInterval(() => deployLog.catchUp(), 3000);
+  serverLog.start();
+  ctx.subscriptions.push(
+    deployLogWatcher,
+    deployLog.channel,
+    serverLog.channel,
+    { dispose: () => { clearInterval(deployLogPoll); serverLog.stop(); } },
+    vscode.commands.registerCommand("redstone.showLogs", () => { serverLog.channel.show(true); }),
+  );
+
   course.schedule(false, 0);
+  // Layout on open: explorer left, the Course panel right, the server log below.
   void vscode.commands.executeCommand("redstone.lesson.focus");
+  serverLog.channel.show(true);
 }
 
 export function deactivate(): void {}

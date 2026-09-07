@@ -17,7 +17,15 @@ POLL="${POLL:-5}"
 LOCK=/state/deploy.lock
 mkdir -p "$WS/packs" "$WS/.course" /state
 
-deploy() { flock "$LOCK" /sidecar/deploy-learner.sh || true; }
+LOG="$WS/.course/deploy.log"
+deploy() {
+  # The editor tails deploy.log into its Deploy output channel. Keep the
+  # file bounded; an unchanged-packs run prints nothing, so polls stay quiet.
+  flock "$LOCK" /sidecar/deploy-learner.sh 2>&1 | tee -a "$LOG" || true
+  if [ "$(stat -c %s "$LOG" 2>/dev/null || echo 0)" -gt 300000 ]; then
+    tail -c 150000 "$LOG" > "$LOG.tmp" && mv "$LOG.tmp" "$LOG"
+  fi
+}
 
 echo "==> initial deploy"
 deploy
