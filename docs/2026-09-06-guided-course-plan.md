@@ -181,6 +181,15 @@ The whole spec. `course/FORMAT.md` will carry it with examples.
 
 ## Thread A: content
 
+**Superseded on 2026-09-07** by
+[the course design](./2026-09-07-course-design.md) after the
+[review of the first five lessons](./reviews/2026-09-07-lesson-review-01-05.md).
+Three rules now govern content (see `course/FORMAT.md`): every lesson has
+a playable impact, the workspace starts from a complete working skeleton,
+and lessons do not depend on each other. The sequence below is the original
+and is kept for the record; the design document is what lessons are written
+from.
+
 Independent of the platform. Everything here runs on a laptop against a
 scratch workspace, and can be tried on the live server today with `mc dev`
 pointing at a workspace's `packs/` directory.
