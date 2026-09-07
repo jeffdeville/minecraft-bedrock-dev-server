@@ -48,7 +48,11 @@ DEFAULT_MSG = "this step is not done yet"
 
 
 class Fail(Exception):
-    """A check failed; args are (msg, got)."""
+    """A check failed: msg for the learner, got (what was found), code for the event log."""
+
+    def __init__(self, msg, got=None, code=None):
+        super().__init__(msg, got)
+        self.msg, self.got, self.code = msg, got, code
 
 
 class Skip(Exception):
@@ -110,13 +114,14 @@ def parse_frontmatter(text, name):
 
 # Kinds in the order run_check tries them: a json check may carry "exists": true
 # as a condition, so "exists" is only the kind when nothing more specific is present.
-KINDS = ("json", "regex", "same", "js", "deploy", "game", "exists")
+KINDS = ("json", "regex", "same", "differs", "js", "deploy", "game", "exists")
 ALLOWED_KEYS = {
-    "json": {"json", "path", "exists", "absent", "equals", "not", "matches", "oneOf", "uuid", "differsFrom", "exact"},
-    "regex": {"regex", "pattern", "count", "exact"},
-    "same": {"same"},
+    "json": {"json", "path", "exists", "absent", "equals", "not", "matches", "oneOf", "uuid", "differsFrom", "loose"},
+    "regex": {"regex", "pattern", "count", "loose"},
+    "same": {"same", "loose"},
+    "differs": {"differs", "loose"},
     "js": {"js"},
-    "deploy": {"deploy", "behavior_packs", "resource_packs"},
+    "deploy": {"deploy", "behavior_packs", "resource_packs", "scripts_ok"},
     "game": {"game"},
     "exists": {"exists", "png"},
 }
@@ -172,16 +177,16 @@ def validate_check(c, where):
         need_regex(c.get("pattern"))
         if "count" in c and not isinstance(c["count"], int):
             raise BadLesson(f"{where}: count must be a whole number")
-    elif kind == "same":
-        specs = c["same"]
+    elif kind in ("same", "differs"):
+        specs = c[kind]
         if not isinstance(specs, list) or len(specs) != 2 or not all(isinstance(s, dict) for s in specs):
-            raise BadLesson(f"{where}: same needs a list of exactly two specs")
+            raise BadLesson(f"{where}: {kind} needs a list of exactly two specs")
         for s in specs:
             if not relative_path(s.get("file")):
-                raise BadLesson(f"{where}: each same spec needs a file inside the workspace")
+                raise BadLesson(f"{where}: each {kind} spec needs a file inside the workspace")
             how = [k for k in ("path", "key", "pattern") if k in s]
             if len(how) != 1:
-                raise BadLesson(f"{where}: each same spec needs exactly one of path, key, pattern")
+                raise BadLesson(f"{where}: each {kind} spec needs exactly one of path, key, pattern")
             if "pattern" in s:
                 need_regex(s["pattern"])
     elif kind in ("js", "exists"):
@@ -327,19 +332,50 @@ def now():
     return time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
 
+def log_event(ws, **fields):
+    """Append one line to .course/events.jsonl. Codes and labels only; never
+    anything the learner typed (FORMAT.md, events.jsonl)."""
+    try:
+        p = ws / ".course" / "events.jsonl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"t": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **fields}) + "\n")
+    except OSError:
+        pass
+
+
+BROKEN_CODES = {"json.parse", "fence", "js.syntax", "text.bom", "text.binary"}
+
+
+def check_event(ws, lesson, entry, failing, results, source):
+    """The one event a check run produces."""
+    if failing is None:
+        log_event(ws, lesson=lesson.id, step=len(lesson.steps), event="check", outcome="pass", source=source)
+        return
+    last = next((r for r in reversed(results) if r["step"] == failing.n and r["status"] == "fail"), None)
+    log_event(ws, lesson=lesson.id, step=failing.n, event="check", outcome="fail",
+              code=last["code"] if last else "unknown", check=last["label"] if last else "",
+              attempt=entry.get("fails", {}).get(str(failing.n), 0), source=source)
+
+
 # --- value extraction ----------------------------------------------------------
 
 def read_text(ws, rel):
     path = ws / rel
     if not path.is_file():
-        raise Fail(f"the file {rel} does not exist", None)
+        raise Fail(f"the file {rel} does not exist", None, "exists.missing")
     raw = path.read_bytes()
     if raw.startswith(b"\xef\xbb\xbf"):
-        raise Fail(f"{rel} starts with an invisible BOM character; re-save it as plain UTF-8", None)
+        raise Fail(f"{rel} starts with an invisible BOM character; re-save it as plain UTF-8", None, "text.bom")
     try:
-        return raw.decode("utf-8").replace("\r\n", "\n")
+        text = raw.decode("utf-8").replace("\r\n", "\n")
     except UnicodeDecodeError:
-        raise Fail(f"{rel} is not a UTF-8 text file", None)
+        raise Fail(f"{rel} is not a UTF-8 text file", None, "text.binary")
+    first = next((l for l in text.splitlines() if l.strip()), "")
+    if first.lstrip().startswith("```"):
+        raise Fail(f"the first line of {rel} is ``` : that line is part of the lesson page, not the file; "
+                   "delete it and the ``` at the end", None, "fence")
+    return text
 
 
 def blank_strings(text):
@@ -353,8 +389,8 @@ def load_json(ws, rel):
         return json.loads(text)
     except json.JSONDecodeError as e:
         if re.search(r"//|/\*", blank_strings(text)):
-            raise Fail(f"{rel} has // or /* comments in it; JSON files cannot have comments", None)
-        raise Fail(f"{rel} is not valid JSON: {explain_json_error(text, e)}", None)
+            raise Fail(f"{rel} has // or /* comments in it; JSON files cannot have comments", None, "json.parse")
+        raise Fail(f"{rel} is not valid JSON: {explain_json_error(text, e)}", None, "json.parse")
 
 
 def explain_json_error(text, e):
@@ -365,6 +401,9 @@ def explain_json_error(text, e):
         return "the file is empty"
     if stripped[0] not in "{[":
         return "the file should start with an opening {"
+    bare = re.search(r'"[^"\n]*":\s*([0-9a-fA-F]{8}-[0-9a-fA-F-]{27})(?!")', text)
+    if bare and text.count("\n", 0, bare.start()) + 1 >= e.lineno - 1:
+        return f"the uuid on line {text.count(chr(10), 0, bare.start()) + 1} lost its quotes; it needs \" before and after it"
     if "Unterminated string" in e.msg or "Invalid control character" in e.msg:
         return f"a closing quote is missing at {where}; the text runs on past the end of the line"
     if e.pos >= len(text.rstrip()):
@@ -419,12 +458,12 @@ def lang_value(text, key):
     return False, None
 
 
-def rx_flags(exact):
-    """FORMAT.md: regexes are case-insensitive and multiline unless "exact": true."""
-    return re.M if exact else re.M | re.I
+def rx_flags(loose):
+    """FORMAT.md: matching is exact by default; "loose": true ignores case."""
+    return re.M | re.I if loose else re.M
 
 
-def extract(ws, spec, exact=False):
+def extract(ws, spec, loose=False):
     rel = spec.get("file")
     if not rel:
         raise Fail("check is missing a file", None)
@@ -434,15 +473,15 @@ def extract(ws, spec, exact=False):
     if "key" in spec:
         return lang_value(text, spec["key"])
     if "pattern" in spec:
-        m = re.search(spec["pattern"], text, rx_flags(exact))
+        m = re.search(spec["pattern"], text, rx_flags(loose))
         if not m:
             return False, None
         return True, (m.group(1) if m.groups() else m.group(0))
     raise Fail("check needs one of path, key, pattern", None)
 
 
-def norm(value, exact):
-    if isinstance(value, str) and not exact:
+def norm(value, loose):
+    if isinstance(value, str) and loose:
         return value.strip().lower()
     return value
 
@@ -463,15 +502,34 @@ def check_exists(ws, c):
     # server's disk will not, so insist on the exact name here too.
     exact_name = parent.is_dir() and path.name in os.listdir(parent)
     if not path.is_file() or not exact_name:
-        if parent.is_dir():
-            near = [n for n in os.listdir(parent) if n.lower() == path.name.lower() and n != path.name]
-            if near:
-                raise Fail(c["msg"], f"found {near[0]} instead; the name must be exactly {path.name}")
-        raise Fail(c["msg"], None)
+        found = misplaced(ws, path)
+        if found:
+            raise Fail(c["msg"], f"found {found} instead; it must be at {rel}, spelled exactly like that", "exists.misplaced")
+        raise Fail(c["msg"], None, "exists.missing")
     if c.get("png"):
         with open(path, "rb") as f:
             if f.read(8) != PNG_SIG:
-                raise Fail(c["msg"], f"{rel} is not a PNG image")
+                raise Fail(c["msg"], f"{rel} is not a PNG image", "exists.png")
+
+
+def misplaced(ws, path):
+    """Where a file the learner meant to create actually went: the same name in
+    another folder, another case, or with an extra extension (manifest.json.txt)."""
+    want = path.name.lower()
+    stem = path.stem.lower()
+    for root in (ws / "packs", ws):
+        if not root.is_dir():
+            continue
+        for p in sorted(root.rglob("*")):
+            if not p.is_file() or ".git" in p.parts or ".course" in p.parts:
+                continue
+            name = p.name.lower()
+            if p == path or (name != want and not name.startswith(want + ".") and name.split(".")[0] != stem):
+                continue
+            if name.split(".")[0] == stem and name != want and not name.startswith(want + "."):
+                continue
+            return str(p.relative_to(ws))
+    return None
 
 
 def check_json(ws, c):
@@ -481,22 +539,25 @@ def check_json(ws, c):
 def check_json_value(c, data):
     rel, path = c["json"], c["path"]
     found, value = get_path(data, path)
-    exact = c.get("exact", False)
+    loose = c.get("loose", False)
     if c.get("absent"):
         if found:
-            raise Fail(c["msg"], f"{path} is there, and it should not be: it is {show(value)}")
+            raise Fail(c["msg"], f"{path} is there, and it should not be: it is {show(value)}", "json.absent")
         return
     if not found:
-        raise Fail(c["msg"], f"{path} is missing from {rel}")
-    if "equals" in c and norm(value, exact) != norm(c["equals"], exact):
-        raise Fail(c["msg"], f"{path} is {show(value)}, want {show(c['equals'])}")
-    if "not" in c and norm(value, exact) == norm(c["not"], exact):
-        raise Fail(c["msg"], f"{path} is still {show(value)}")
-    if "oneOf" in c and norm(value, exact) not in [norm(v, exact) for v in c["oneOf"]]:
-        raise Fail(c["msg"], f"{path} is {show(value)}, want one of {', '.join(show(v) for v in c['oneOf'])}")
+        raise Fail(c["msg"], f"{path} is missing from {rel}", "json.missing")
+    if "equals" in c and norm(value, loose) != norm(c["equals"], loose):
+        got = f"{path} is {show(value)}, want {show(c['equals'])}"
+        if isinstance(value, str) and isinstance(c["equals"], str) and value.strip().lower() == c["equals"].strip().lower():
+            got += " (spelled exactly like that: capital letters and spaces matter here)"
+        raise Fail(c["msg"], got, "json.equals")
+    if "not" in c and norm(value, loose) == norm(c["not"], loose):
+        raise Fail(c["msg"], f"{path} is still {show(value)}", "json.not")
+    if "oneOf" in c and norm(value, loose) not in [norm(v, loose) for v in c["oneOf"]]:
+        raise Fail(c["msg"], f"{path} is {show(value)}, want one of {', '.join(show(v) for v in c['oneOf'])}", "json.oneOf")
     if "matches" in c:
-        if not isinstance(value, str) or not re.search(c["matches"], value, rx_flags(exact)):
-            raise Fail(c["msg"], f"{path} is {show(value)}")
+        if not isinstance(value, str) or not re.search(c["matches"], value, rx_flags(loose)):
+            raise Fail(c["msg"], f"{path} is {show(value)}", "json.matches")
     if c.get("uuid"):
         if not isinstance(value, str) or not UUID_RE.match(value):
             got = f"{path} is {show(value)}"
@@ -504,21 +565,25 @@ def check_json_value(c, data):
                 got += " (that is the placeholder text)"
             elif isinstance(value, str) and re.search(r"[{}\s]", value):
                 got += " (no spaces, quotes or braces belong inside it)"
-            raise Fail(c["msg"], got)
+            raise Fail(c["msg"], got, "json.uuid")
     if "differsFrom" in c:
         ok2, other = get_path(data, c["differsFrom"])
-        if ok2 and norm(other, exact) == norm(value, exact):
-            raise Fail(c["msg"], f"{path} and {c['differsFrom']} are both {show(value)}")
+        if ok2 and norm(other, loose) == norm(value, loose):
+            raise Fail(c["msg"], f"{path} and {c['differsFrom']} are both {show(value)}", "json.differsFrom")
 
 
 def check_regex(ws, c):
     text = read_text(ws, c["regex"])
-    hits = re.findall(c["pattern"], text, rx_flags(c.get("exact")))
+    loose = c.get("loose", False)
+    hits = re.findall(c["pattern"], text, rx_flags(loose))
     if "count" in c:
         if len(hits) != c["count"]:
-            raise Fail(c["msg"], f"found it {len(hits)} time(s) in {c['regex']}, want {c['count']}")
+            raise Fail(c["msg"], f"found it {len(hits)} time(s) in {c['regex']}, want {c['count']}", "regex.count")
     elif not hits:
-        raise Fail(c["msg"], f"not found in {c['regex']}")
+        got = f"not found in {c['regex']}"
+        if not loose and re.search(c["pattern"], text, re.M | re.I):
+            got += " (it is there with different capital letters; the game needs it spelled exactly)"
+        raise Fail(c["msg"], got, "regex.missing")
 
 
 def same_value(a, b):
@@ -537,18 +602,30 @@ def same_value(a, b):
     return as_text(a) == as_text(b)
 
 
-def check_same(ws, c):
-    a, b = c["same"]
-    fa, va = extract(ws, a)
-    fb, vb = extract(ws, b)
+def two_values(ws, c, kind):
+    a, b = c[kind]
+    loose = c.get("loose", False)
+    fa, va = extract(ws, a, loose)
+    fb, vb = extract(ws, b, loose)
     where_a = a.get("path") or a.get("key") or "the pattern"
     where_b = b.get("path") or b.get("key") or "the pattern"
     if not fa:
-        raise Fail(c["msg"], f"{where_a} is missing from {a['file']}")
+        raise Fail(c["msg"], f"{where_a} is missing from {a['file']}", f"{kind}.missing")
     if not fb:
-        raise Fail(c["msg"], f"{where_b} is missing from {b['file']}")
+        raise Fail(c["msg"], f"{where_b} is missing from {b['file']}", f"{kind}.missing")
+    return a, b, norm(va, loose), norm(vb, loose)
+
+
+def check_same(ws, c):
+    a, b, va, vb = two_values(ws, c, "same")
     if not same_value(va, vb):
-        raise Fail(c["msg"], f"{a['file']} says {show(va)} but {b['file']} says {show(vb)}")
+        raise Fail(c["msg"], f"{a['file']} says {show(va)} but {b['file']} says {show(vb)}", "same.differ")
+
+
+def check_differs(ws, c):
+    a, b, va, vb = two_values(ws, c, "differs")
+    if same_value(va, vb):
+        raise Fail(c["msg"], f"{a['file']} and {b['file']} both say {show(va)}", "differs.same")
 
 
 JS_NOISE_RE = re.compile(
@@ -623,18 +700,24 @@ def check_deploy(ws, c):
     except (json.JSONDecodeError, OSError, UnicodeDecodeError):
         d = None
     if not isinstance(d, dict):
-        raise Fail(c["msg"], "the deploy status file is empty or half-written; wait a moment and check again")
+        raise Fail(c["msg"], "the deploy status file is empty or half-written; wait a moment and check again", "deploy.pending")
     if d.get("status") != c["deploy"]:
         got = f"the last deploy {d.get('status') or 'is unknown'}"
         if d.get("detail"):
             got += f": {d['detail']}"
-        raise Fail(c["msg"], got)
+        raise Fail(c["msg"], got, "deploy.failed")
+    if d.get("status") == "ok" and d.get("detail"):
+        raise Fail(c["msg"], f"the server is still coming back ({d['detail']}); wait for the status bar to say live", "deploy.pending")
     for kind in ("behavior_packs", "resource_packs"):
         installed = d.get(kind) if isinstance(d.get(kind), list) else []
         for name in c.get(kind, []):
             if name not in installed:
                 raise Fail(c["msg"], f"{name} was not installed by the last deploy "
-                                     f"(it installed: {', '.join(map(str, installed)) or 'nothing'})")
+                                     f"(it installed: {', '.join(map(str, installed)) or 'nothing'})", "deploy.packs")
+    if c.get("scripts_ok"):
+        errors = d.get("script_errors") if isinstance(d.get("script_errors"), list) else []
+        if errors:
+            raise Fail(c["msg"], "the server refused your script: " + str(errors[0])[:300], "deploy.scripts")
 
 
 NO_GAME = False  # set by `lesson json --no-game`: the extension runs game checks from a button
@@ -645,11 +728,11 @@ def check_game(ws, c):
     if not hook.is_file() or not os.access(hook, os.X_OK):
         raise Skip("no game here; this check runs on the course server")
     if NO_GAME:
-        raise Fail(c["msg"], "waiting: press 'Check in the game' in the Course panel once your server is up")
+        raise Fail(c["msg"], "waiting: press 'Check in the game' in the Course panel once your server is up", "game.waiting")
     try:
         r = subprocess.run([str(hook), c["game"]], capture_output=True, text=True, timeout=GAME_TIMEOUT)
     except subprocess.TimeoutExpired:
-        raise Fail(c["msg"], "the game did not answer in time; is the server running?")
+        raise Fail(c["msg"], "the game did not answer in time; is the server running?", "game.fail")
     if r.returncode == 0:
         return
     lines = [l.strip() for l in (r.stdout + "\n" + r.stderr).splitlines() if l.strip()]
@@ -658,13 +741,14 @@ def check_game(ws, c):
         reason = verdict.group(3)
     else:
         reason = lines[-1] if lines else ""
-    raise Fail(c["msg"], reason or "the game said no")
+    raise Fail(c["msg"], reason or "the game said no", "game.fail")
 
 
 CHECKS = {
     "json": check_json,
     "regex": check_regex,
     "same": check_same,
+    "differs": check_differs,
     "js": check_js,
     "deploy": check_deploy,
     "game": check_game,
@@ -678,9 +762,9 @@ def label(c):
     kind = check_kind(c)
     if kind == "json":
         return f"{c.get('json')}: {c.get('path')}"
-    if kind == "same":
-        files = [s.get("file", "?") if isinstance(s, dict) else "?" for s in (c.get("same") or [])[:2]]
-        return " and ".join(files) + " agree"
+    if kind in ("same", "differs"):
+        files = [s.get("file", "?") if isinstance(s, dict) else "?" for s in (c.get(kind) or [])[:2]]
+        return " and ".join(files) + (" agree" if kind == "same" else " differ")
     if kind == "regex":
         return f"{c.get('regex')} contains {c.get('pattern')}"
     if kind == "deploy":
@@ -691,10 +775,10 @@ def label(c):
 
 
 def run_check(ws, c):
-    """Return ('ok', None), ('skip', reason) or ('fail', (msg, got))."""
+    """Return ('ok', None), ('skip', reason) or ('fail', (msg, got, code))."""
     kind = check_kind(c)
     if kind is None:
-        return "fail", (f"unknown check {json.dumps(c)}", None)
+        return "fail", (f"unknown check {json.dumps(c)}", None, "check.broken")
     c = {"msg": DEFAULT_MSG, **c}
     try:
         CHECKS[kind](ws, c)
@@ -702,10 +786,23 @@ def run_check(ws, c):
     except Skip as e:
         return "skip", str(e)
     except Fail as e:
-        msg, got = e.args
-        return "fail", (msg, got)
+        return "fail", (e.msg, e.got, e.code or guess_code(kind, e.got))
     except Exception as e:  # a broken check must never take the learner's terminal down
-        return "fail", (f"the check itself is broken ({e!r}); tell whoever wrote this lesson", None)
+        return "fail", (f"the check itself is broken ({e!r}); tell whoever wrote this lesson", None, "check.broken")
+
+
+def guess_code(kind, got):
+    """A code for a Fail raised without one (the js rules), from what it said."""
+    text = got or ""
+    if kind == "js":
+        if "SyntaxError" in text or "syntax" in text.lower():
+            return "js.syntax"
+        if "console.log" in text:
+            return "js.console_log"
+        if "top of the file" in text:
+            return "js.top_level"
+        return "js.rule"
+    return f"{kind}.fail"
 
 
 def run_lesson(ws, lesson, upto=None, out=None, results=None):
@@ -739,14 +836,14 @@ def run_lesson(ws, lesson, upto=None, out=None, results=None):
                     results.append({"step": step.n, "label": label(c), "status": "skip", "reason": info})
             else:
                 step_ok = False
-                msg, got = info
+                msg, got, code = info
                 if out is not None:
                     out.append(f"not ok {n} - {label(c)}")
                     out.append(f"  # {msg}")
                     if got:
                         out.append(f"  # got: {got}")
                 if results is not None:
-                    results.append({"step": step.n, "label": label(c), "status": "fail", "msg": msg, "got": got or ""})
+                    results.append({"step": step.n, "label": label(c), "status": "fail", "msg": msg, "got": got or "", "code": code})
                 break  # one thing at a time: the rest of this step waits
         if step_ok:
             passed += 1
@@ -797,8 +894,11 @@ def cmd_check(ws, lessons, prog, args, attempt=True):
     positional = [a for a in args if not a.startswith("--")]
     lesson = lesson_by_id(lessons, positional[0]) if positional else current_lesson(ws, lessons, prog)
     out = None if quiet else []
-    passed, failing, skipped = run_lesson(ws, lesson, upto=upto, out=out)
+    results = []
+    passed, failing, skipped = run_lesson(ws, lesson, upto=upto, out=out, results=results)
     entry = record(ws, prog, lesson, passed, failing, attempt=attempt) if upto is None else None
+    if entry is not None:
+        check_event(ws, lesson, entry, failing, results, "cli" if attempt else "watch")
     if quiet:
         return 0 if failing is None else 1
     print(f"# {lesson.id}: {lesson.title}")
@@ -860,6 +960,7 @@ def cmd_hint(ws, lessons, prog, args):
     if failing is None:
         print("Nothing to hint at: every step of this lesson passes.")
         return 0
+    log_event(ws, lesson=lesson.id, step=failing.n, event="hint", source="cli")
     print(f"Step {failing.n}: {failing.title}")
     print()
     print(indent(failing.hint or "There is no hint for this step. Try `lesson answer`."))
@@ -966,6 +1067,22 @@ def print_diff(rel, mine, want):
         print(line)
 
 
+def step_files(step):
+    """The files a step's checks name, in order, without repeats."""
+    files = []
+    for c in step.checks:
+        kind = check_kind(c)
+        names = []
+        if kind in ("json", "regex", "js", "exists"):
+            names = [c[kind]]
+        elif kind in ("same", "differs"):
+            names = [s.get("file") for s in c[kind] if isinstance(s, dict)]
+        for f in names:
+            if isinstance(f, str) and f and f not in files:
+                files.append(f)
+    return files
+
+
 def cmd_answer(ws, lessons, prog, args):
     lesson, failing = where(ws, lessons, prog)
     if failing is None:
@@ -987,8 +1104,9 @@ def cmd_answer(ws, lessons, prog, args):
         print(f"No answer is available for step {n} yet.")
         return 1
     apply = "--apply" in args
+    log_event(ws, lesson=lesson.id, step=n, event="apply" if apply else "answer", source="cli")
     changed = 0
-    for rel in lesson.files:
+    for rel in step_files(lesson.steps[n - 1]) or lesson.files:
         want = show_at(ws, tag, rel)
         if want is None:
             continue  # the solution has not created this file by this step; leave it alone
@@ -1026,6 +1144,7 @@ def cmd_next(ws, lessons, prog, args):
     nxt = lessons[i + 1]
     prog["current"] = nxt.id
     save_progress(ws, prog)
+    log_event(ws, lesson=nxt.id, step=1, event="next", source="cli")
     print(f"Lesson {i + 2}: {nxt.title}")
     print(f"  Open lessons/{nxt.path.name} to start.")
     return 0
@@ -1135,14 +1254,31 @@ def cmd_json(ws, lessons, prog, args):
     global NO_GAME
     NO_GAME = "--no-game" in args
     attempt = "--no-attempt" not in args
+    source = args[args.index("--source") + 1] if "--source" in args and args.index("--source") + 1 < len(args) else "button"
     lesson = current_lesson(ws, lessons, prog)
     results = []
     passed, failing, _ = run_lesson(ws, lesson, results=results)
+    high = prog["lessons"].get(lesson.id, {}).get("high", 0)
+    # A file that stops parsing fails an early step for a learner who was further
+    # along: keep showing the step they had reached, say what broke, and do not
+    # count the save as an attempt (FORMAT.md, "broken").
+    broken = None
+    last_fail = next((r for r in reversed(results) if r["status"] == "fail"), None)
+    if failing is not None and last_fail and last_fail["code"] in BROKEN_CODES and failing.n <= high:
+        broken = {"file": last_fail["label"].split(":")[0], "message": last_fail["msg"]}
+        attempt = False
     entry = record(ws, prog, lesson, passed, failing, attempt=attempt)
     current = failing.n if failing else None
+    if broken:
+        current = min(high + 1, len(lesson.steps))
+        log_event(ws, lesson=lesson.id, step=current, event="broken", code=last_fail["code"], check=last_fail["label"], source=source)
+    else:
+        check_event(ws, lesson, entry, failing, results, source)
     steps = []
     for step in lesson.steps:
-        if step.n <= passed:
+        if broken:
+            status = "done" if step.n < current else "current" if step.n == current else "todo"
+        elif step.n <= passed:
             status = "done"
         elif failing is not None and step.n == failing.n:
             status = "current"
@@ -1184,6 +1320,7 @@ def cmd_json(ws, lessons, prog, args):
             "current_step": current,
             "done": failing is None,
             "fails": entry.get("fails", {}).get(str(current), 0) if current else 0,
+            "broken": broken,
         },
         "deploy": deploy,
         "game_available": hook.is_file() and os.access(hook, os.X_OK),

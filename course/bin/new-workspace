@@ -11,7 +11,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from courselib import COURSE, build_tags, die, init_repo, stage_workspace
+from courselib import COURSE, build_tags, die, init_repo, load_vars, stage_workspace
 
 
 def remove_contents(ws):
@@ -32,7 +32,7 @@ def main(argv):
         die(f"{ws} exists and is not empty")
     created = not ws.exists()
     try:
-        stage_workspace(ws)
+        stage_workspace(ws, load_vars(ws))
         init_repo(ws, "Course workspace")
         build_tags(ws)
     except BaseException:

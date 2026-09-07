@@ -178,18 +178,35 @@ def restart_server(name, wait=True):
     since = int(time.time())
     r = docker("restart", c, timeout=90)
     if r.returncode != 0:
-        return False, f"could not restart the server: {r.stderr.strip()[:200]}"
+        return False, f"could not restart the server: {r.stderr.strip()[:200]}", []
     if not wait:
-        return True, "restarting"
+        return True, "restarting", []
     deadline = time.time() + RESTART_WAIT
     while time.time() < deadline:
         time.sleep(2)
         if container_state(c) != "running":
             continue
         logs = docker("logs", "--since", str(since), c, timeout=10)
-        if "Server started" in logs.stdout + logs.stderr:
-            return True, "started"
-    return False, f"the server did not report 'Server started' within {RESTART_WAIT}s"
+        text = logs.stdout + logs.stderr
+        if "Server started" in text:
+            return True, "started", script_errors(text)
+    return False, f"the server did not report 'Server started' within {RESTART_WAIT}s", []
+
+
+SCRIPT_ERROR_RE = re.compile(r"\[Scripting\]")
+
+
+def script_errors(text):
+    """The script errors the server printed while starting: [Scripting] lines
+    that are errors, without the course grader's own output and the timestamp."""
+    out = []
+    for line in text.splitlines():
+        if not SCRIPT_ERROR_RE.search(line) or "[course]" in line:
+            continue
+        if not re.search(r"error|Error|failed|cannot|Cannot|not found|Unexpected", line):
+            continue
+        out.append(re.sub(r"^\[[^\]]+\]\s*(ERROR|WARN|INFO)?\s*", "", line).strip()[:400])
+    return out[:10]
 
 
 def provision(name):
@@ -470,8 +487,13 @@ class Handler(BaseHTTPRequestHandler):
         name = parts[3]
         if not self.token_owner(name):
             return self.send_text("forbidden", 403)
-        ok, detail = restart_server(name)
-        self.send_text(detail + "\n", 200 if ok else 504)
+        ok, detail, errors = restart_server(name)
+        data = json.dumps({"started": ok, "detail": detail, "script_errors": errors}).encode()
+        self.send_response(200 if ok else 504)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def api_logs(self, path, query):
         """The learner's server log since a timestamp, with docker's own

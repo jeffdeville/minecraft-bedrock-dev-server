@@ -15,6 +15,19 @@ interface Check {
   msg?: string;
   got?: string;
   reason?: string;
+  code?: string;
+}
+
+/** Append one line to .course/events.jsonl (FORMAT.md): codes and labels only, never learner text. */
+function logEvent(ws: string, fields: Record<string, unknown>): void {
+  try {
+    const dir = path.join(ws, ".course");
+    fs.mkdirSync(dir, { recursive: true });
+    const clean = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined && v !== null));
+    fs.appendFileSync(path.join(dir, "events.jsonl"), JSON.stringify({ t: new Date().toISOString(), ...clean }) + "\n");
+  } catch {
+    // never let telemetry break the lesson
+  }
 }
 
 interface Step {
@@ -43,6 +56,7 @@ interface Doc {
     current_step: number | null;
     done: boolean;
     fails: number;
+    broken: { file: string; message: string } | null;
   };
   deploy: {
     status: string;
@@ -122,6 +136,8 @@ class Course {
   private refreshTimer: NodeJS.Timeout | undefined;
   private busy = false;
   private pendingAttempt = false;
+  private pendingSource = "button";
+  private lastDeployAt = "";
   private shownHint = false;
   private answerText: string | undefined;
   private notice: string | undefined;
@@ -138,8 +154,11 @@ class Course {
   // --- refreshing ---------------------------------------------------------
 
   /** Re-run the checker soon. `attempt` counts a failing step towards its hint. */
-  schedule(attempt: boolean, delay = 400): void {
+  schedule(attempt: boolean, delay = 400, source = "button"): void {
     this.pendingAttempt = this.pendingAttempt || attempt;
+    if (attempt) {
+      this.pendingSource = source;
+    }
     if (this.refreshTimer) {
       clearTimeout(this.refreshTimer);
     }
@@ -155,7 +174,7 @@ class Course {
     const attempt = this.pendingAttempt;
     this.pendingAttempt = false;
     try {
-      const args = ["json"];
+      const args = ["json", "--source", attempt ? this.pendingSource : "refresh"];
       if (!attempt) {
         args.push("--no-attempt");
       }
@@ -175,6 +194,7 @@ class Course {
       }
       this.doc = doc;
       this.updateStatus();
+      this.logDeploy(doc);
       this.render();
     } catch (e) {
       this.notice = `could not read the checker's answer: ${e}`;
@@ -182,6 +202,17 @@ class Course {
     } finally {
       this.busy = false;
     }
+  }
+
+  /** One event per deploy, when its timestamp changes. */
+  private logDeploy(doc: Doc): void {
+    const d = doc.deploy;
+    if (!d || !d.at || d.at === this.lastDeployAt || (d.status === "ok" && d.detail)) {
+      return;
+    }
+    this.lastDeployAt = d.at;
+    logEvent(this.ws, { lesson: doc.lesson.id, step: doc.lesson.current_step, event: "deploy",
+      outcome: d.status === "ok" ? "pass" : "fail", code: d.status === "ok" ? undefined : "deploy.failed", source: "sidecar" });
   }
 
   private updateStatus(): void {
@@ -210,6 +241,7 @@ class Course {
 
   async hint(): Promise<void> {
     this.shownHint = true;
+    logEvent(this.ws, { lesson: this.doc?.lesson.id, step: this.doc?.lesson.current_step, event: "hint", source: "button" });
     this.render();
   }
 
@@ -257,7 +289,12 @@ class Course {
     this.render();
     try {
       this.pendingAttempt = true;
+      this.pendingSource = "button";
       await this.refresh(true);
+      const step = this.doc?.lesson.steps.find((s) => s.status === "current");
+      const gameFail = step?.checks.find((c) => c.status === "fail" && /^game\./.test(c.code ?? ""));
+      logEvent(this.ws, { lesson: this.doc?.lesson.id, step: step?.n, event: "game", outcome: gameFail ? "fail" : "pass",
+        code: gameFail ? "game.fail" : undefined, source: "button" });
     } finally {
       this.gameBusy = false;
       this.notice = undefined;
@@ -303,7 +340,7 @@ class Course {
     view.webview.html = this.shell(view.webview);
     view.webview.onDidReceiveMessage((m: { cmd: string; arg?: string }) => {
       switch (m.cmd) {
-        case "check": this.pendingAttempt = true; this.schedule(true, 0); break;
+        case "check": this.pendingAttempt = true; this.schedule(true, 0, "button"); break;
         case "hint": void this.hint(); break;
         case "answer": void this.answer(); break;
         case "apply": void this.applyAnswer(); break;
@@ -392,14 +429,14 @@ export function activate(ctx: vscode.ExtensionContext): void {
   ctx.subscriptions.push(
     vscode.workspace.onDidSaveTextDocument((d) => {
       if (inWorkspace(d.uri.fsPath)) {
-        course.schedule(true);
+        course.schedule(true, 400, "save");
       }
     }),
   );
   const packs = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(ws, "packs/**"));
-  packs.onDidCreate(() => course.schedule(true));
-  packs.onDidDelete(() => course.schedule(true));
-  packs.onDidChange(() => course.schedule(true));
+  packs.onDidCreate(() => course.schedule(true, 400, "save"));
+  packs.onDidDelete(() => course.schedule(true, 400, "save"));
+  packs.onDidChange(() => course.schedule(true, 400, "save"));
   const deploy = vscode.workspace.createFileSystemWatcher(new vscode.RelativePattern(ws, ".course/deploy.json"));
   deploy.onDidChange(() => course.schedule(false));
   deploy.onDidCreate(() => course.schedule(false));
@@ -426,6 +463,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("redstone.showLogs", () => { serverLog.channel.show(true); }),
   );
 
+  logEvent(ws, { event: "panel", source: "open" });
   course.schedule(false, 0);
   // Layout on open: explorer left, the Course panel right, the server log below.
   void vscode.commands.executeCommand("redstone.lesson.focus");

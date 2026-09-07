@@ -57,7 +57,13 @@
       </section>`);
 
       const waiting = fails.length && /^waiting:/.test(fails[0].got || "");
-      if (fails.length && !waiting) {
+      if (L.broken) {
+        parts.push(`<section class="result fail">
+          <h3>Something stopped working in ${esc(L.broken.file)}</h3>
+          <p class="msg">${esc(L.broken.message)}</p>
+          <p class="muted">Fix that first: your earlier steps are still there. "Show the answer" shows this step's version of the file.</p>
+        </section>`);
+      } else if (fails.length && !waiting) {
         parts.push(`<section class="result fail">
           <h3>Not yet</h3>
           ${fails.map((c) => `<p class="msg">${esc(c.msg)}</p>${c.got ? `<p class="got">${esc(c.got)}</p>` : ""}`).join("")}
@@ -65,7 +71,7 @@
       } else if (waiting) {
         parts.push(`<section class="result waiting">
           <h3>Ready for the game</h3>
-          <p class="msg">This step is checked inside Minecraft. Save, wait for the status bar to say <b>live</b>, then press the button.</p>
+          <p class="msg">This step is checked inside Minecraft. Wait for the status bar to say <b>live</b>, then press the button.</p>
         </section>`);
       }
 

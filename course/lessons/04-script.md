@@ -77,7 +77,7 @@ placeholder, paste.
 ## Step 3: Ask for the server's toolbox
 <!-- check
 {"json": "packs/kid_bp/manifest.json", "path": "dependencies[1].module_name", "equals": "@minecraft/server", "msg": "the dependencies list needs a second entry with \"module_name\": \"@minecraft/server\", after the resource pack one"}
-{"json": "packs/kid_bp/manifest.json", "path": "dependencies[1].version", "equals": "2.9.0", "exact": true, "msg": "the @minecraft/server version must be exactly \"2.9.0\" in quotes, because that is what this server offers"}
+{"json": "packs/kid_bp/manifest.json", "path": "dependencies[1].version", "equals": "2.9.0", "msg": "the @minecraft/server version must be exactly \"2.9.0\" in quotes, because that is what this server offers"}
 {"json": "packs/kid_bp/manifest.json", "path": "dependencies[1].uuid", "absent": true, "msg": "a dependency has either a uuid (a pack) or a module_name (a toolbox), never both; remove the uuid from the @minecraft/server entry"}
 -->
 In the same file, the `dependencies` list already names your resource pack.

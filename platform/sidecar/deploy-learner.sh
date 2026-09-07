@@ -17,11 +17,16 @@ ADDONS="$STATE/addons"
 LEVEL="${LEVEL_NAME:-world}"
 started=$(date +%s)
 
+SCRIPT_ERRORS='[]'
 write_state() {
-  # write_state STATUS DETAIL
-  python3 - "$WS/.course/deploy.json" "$1" "$2" "$STATE/installed-packs.json" "${revision:-}" "$(( $(date +%s) - started ))" <<'PY'
+  # write_state STATUS DETAIL   (SCRIPT_ERRORS: a JSON list from the restart endpoint)
+  SCRIPT_ERRORS="$SCRIPT_ERRORS" python3 - "$WS/.course/deploy.json" "$1" "$2" "$STATE/installed-packs.json" "${revision:-}" "$(( $(date +%s) - started ))" <<'PY'
 import json, os, sys, time
 path, status, detail, installed, rev, secs = sys.argv[1:7]
+try:
+    script_errors = json.loads(os.environ.get("SCRIPT_ERRORS") or "[]")
+except ValueError:
+    script_errors = []
 packs = {"behavior_packs": [], "resource_packs": []}
 try:
     with open(installed) as f:
@@ -39,6 +44,7 @@ with open(tmp, "w") as f:
         "duration_seconds": int(secs),
         "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "at_epoch": int(time.time()),
+        "script_errors": script_errors,
         **packs,
     }, f, indent=2)
 os.replace(tmp, path)
@@ -75,11 +81,20 @@ write_state ok "server restarting"
 answer=$(curl -sS -m 200 -X POST -H "Authorization: Bearer ${COURSE_TOKEN:-}" \
   "${COURSE_CONTROL:-http://redstone-control:8000}/api/restart/$LEARNER" 2>&1)
 rc=$?
-echo "==> restart: $answer"
-if [ $rc -eq 0 ] && [ "$answer" = "started" ]; then
+started=$(printf '%s' "$answer" | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin); print("yes" if d.get("started") else "no"); print(json.dumps(d.get("script_errors", [])))
+except Exception: print("no"); print("[]")' 2>/dev/null)
+SCRIPT_ERRORS=$(printf '%s\n' "$started" | sed -n 2p)
+[ -n "$SCRIPT_ERRORS" ] || SCRIPT_ERRORS='[]'
+echo "==> restart: ${answer:0:200}"
+if [ $rc -eq 0 ] && [ "$(printf '%s\n' "$started" | sed -n 1p)" = "yes" ]; then
+  if [ "$SCRIPT_ERRORS" != "[]" ]; then
+    echo "==> the server refused a script:"; printf '%s\n' "$SCRIPT_ERRORS" | python3 -c 'import json,sys; [print("   ", e) for e in json.load(sys.stdin)]'
+  fi
   write_state ok ""
 else
-  write_state ok "packs installed; the server is taking a while to come back (${answer:-no answer})"
+  write_state ok "packs installed; the server is taking a while to come back (${answer:0:120})"
 fi
 
 # --- 4. snapshot ----------------------------------------------------------------

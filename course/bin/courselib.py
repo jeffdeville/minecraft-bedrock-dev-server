@@ -7,11 +7,13 @@ of duplicating its lesson parser.
 
 import importlib.machinery
 import importlib.util
+import json
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 COURSE = Path(__file__).resolve().parent.parent
@@ -52,9 +54,59 @@ def lesson_paths():
     return sorted((COURSE / "lessons").glob("*.md"))
 
 
-def copy_tree(src, dst):
-    """Copy src's contents over dst, creating directories, overwriting files."""
-    shutil.copytree(src, dst, dirs_exist_ok=True)
+PLACEHOLDER_RE = re.compile(r"\{\{([A-Z][A-Z0-9_]*)\}\}")
+VAR_NAMES = ["BP_HEADER_UUID", "BP_DATA_UUID", "BP_SCRIPT_UUID", "RP_HEADER_UUID", "RP_MODULE_UUID",
+             "SPARE_UUID_1", "SPARE_UUID_2", "SPARE_UUID_3", "SPARE_UUID_4"]
+
+
+def load_vars(ws):
+    """This workspace's placeholder values (.course/vars.json), created on first use."""
+    p = ws / ".course" / "vars.json"
+    vars_ = {}
+    if p.exists():
+        try:
+            vars_ = json.loads(p.read_text(encoding="utf-8"))
+        except ValueError:
+            vars_ = {}
+    missing = [k for k in VAR_NAMES if k not in vars_]
+    for k in missing:
+        vars_[k] = str(uuid.uuid4())
+    if missing:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(vars_, indent=2) + "\n", encoding="utf-8")
+    return vars_
+
+
+def render(text, vars_):
+    def sub(m):
+        name = m.group(1)
+        if name not in vars_:
+            die(f"unknown placeholder {{{{{name}}}}}; FORMAT.md lists the standard ones")
+        return vars_[name]
+    return PLACEHOLDER_RE.sub(sub, text)
+
+
+def copy_tree(src, dst, vars_=None):
+    """Copy src's contents over dst, creating directories, overwriting files,
+    rendering {{PLACEHOLDERS}} in text files when vars_ is given."""
+    for p in src.rglob("*"):
+        rel = p.relative_to(src)
+        target = dst / rel
+        if p.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if vars_ is not None:
+            raw = p.read_bytes()
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                text = None
+            if text is not None and PLACEHOLDER_RE.search(text):
+                target.write_text(render(text, vars_), encoding="utf-8")
+                shutil.copystat(p, target)
+                continue
+        shutil.copy2(p, target)
 
 
 def refresh_lessons(ws):
@@ -74,29 +126,36 @@ def refresh_lessons(ws):
 TEMPLATE_OWNED = {".vscode", "assets"}
 
 
-def refresh_template(ws):
+def refresh_template(ws, vars_):
     """Bring an existing workspace up to the current template without touching
     what the learner owns: course-owned entries are overwritten, other
     top-level entries are only added when missing."""
     template = COURSE / "templates" / "workspace"
     for entry in template.iterdir():
         target = ws / entry.name
-        if entry.name in TEMPLATE_OWNED:
+        if entry.name in TEMPLATE_OWNED or not target.exists():
             if entry.is_dir():
-                shutil.copytree(entry, target, dirs_exist_ok=True)
+                copy_tree(entry, target, vars_)
             else:
-                shutil.copy2(entry, target)
-        elif not target.exists():
-            if entry.is_dir():
-                shutil.copytree(entry, target)
-            else:
-                shutil.copy2(entry, target)
+                _copy_file(entry, target, vars_)
 
 
-def stage_workspace(dst):
-    """Lay out a fresh workspace: template plus a copy of every lesson."""
+def _copy_file(src, dst, vars_):
+    raw = src.read_bytes()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = None
+    if text is not None and PLACEHOLDER_RE.search(text):
+        dst.write_text(render(text, vars_), encoding="utf-8")
+    else:
+        shutil.copy2(src, dst)
+
+
+def stage_workspace(dst, vars_):
+    """Lay out a fresh workspace: template (rendered) plus a copy of every lesson."""
     dst.mkdir(parents=True, exist_ok=True)
-    copy_tree(COURSE / "templates" / "workspace", dst)
+    copy_tree(COURSE / "templates" / "workspace", dst, vars_)
     refresh_lessons(dst)
 
 
@@ -133,10 +192,11 @@ def build_tags(ws, verify=True):
                 if checker.check_kind(c) == "game" and c["game"] not in known:
                     die(f"{lesson.path.name}: step {step.n} asks the grader for {c['game']!r}, but "
                         f"course/grader_bp/scripts/main.js has no check with that key")
+    vars_ = load_vars(ws)
     built = []
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
-        stage_workspace(tmp)
+        stage_workspace(tmp, vars_)
         init_repo(tmp, "template")
         for lesson in lessons:
             for step in lesson.steps:
@@ -145,7 +205,7 @@ def build_tags(ws, verify=True):
                 git(tmp, "tag", "-f", before)
                 overlay = COURSE / "solutions" / lesson.id / f"step-{step.n}"
                 if overlay.is_dir():
-                    copy_tree(overlay, tmp)
+                    copy_tree(overlay, tmp, vars_)
                     git(tmp, "add", "-A")
                     if git(tmp, "status", "--porcelain").stdout.strip():
                         git(tmp, "commit", "-q", "-m", f"{lesson.id} step {step.n}")
@@ -162,5 +222,5 @@ def build_tags(ws, verify=True):
                 git(ws, "tag", "-d", tag)
         git(ws, "fetch", "-q", "--no-tags", "--force", str(tmp), "refs/tags/*:refs/tags/*")
     refresh_lessons(ws)
-    refresh_template(ws)
+    refresh_template(ws, vars_)
     return len(built) // 2
